@@ -275,7 +275,7 @@ The user option @code{org-linear-teams} lists the keys of the teams whose issues
 @code{org-linear-file} is the mirrored Org file, by default @samp{linear.org} in @code{org-directory}.
 
 @vindex org-linear-file-header
-@code{org-linear-file-header} is the text a new file starts with. Its @samp{#+TODO} line must cover the keywords of @ref{Workflow states and keywords}, and its @samp{#+PRIORITIES} line the cookies of @code{org-linear-priorities}. Change it before the first sync; afterwards, edit the file's header directly.
+@code{org-linear-file-header} is the text a new file starts with. Its @samp{#+TODO} line must cover the keywords of @ref{Workflow states and keywords}, and its @samp{#+PRIORITIES} line the cookies of @code{org-linear-priorities}. Notes must go into a drawer, or they would count as part of the description: the default header's @samp{logdrawer} startup option sees to that, and you may drop it if your @code{org-log-into-drawer} is already set. Change the header before the first sync; afterwards, edit the file's header directly.
 
 @vindex org-linear-state-file
 @code{org-linear-state-file} holds each issue as it was at the last sync, by default @samp{org-linear/state.eld} under @samp{$XDG_STATE_HOME} or @samp{~/.local/state}. Deleting it makes the next sync treat Linear's values as the starting point.

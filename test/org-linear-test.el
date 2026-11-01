@@ -118,7 +118,9 @@
            (string< cutoff (or (alist-get 'completedAt issue) (alist-get 'canceledAt issue) "")))))
 
 (defun org-linear-test--graphql (query variables callback &optional errback _retried)
-  "Answer QUERY with VARIABLES from the fake board, then CALLBACK or ERRBACK."
+  "Answer QUERY with VARIABLES from the fake board, then CALLBACK or ERRBACK.
+Like Linear, refuse a nil variable, which `json-serialize' sends as {}."
+  (org-linear-test--check-serializable variables)
   (let* ((name (and (string-match "\\(?:query\\|mutation\\) \\(OrgLinear[A-Za-z]+\\)" query)
                     (match-string 1 query)))
          (answer (org-linear-test--answer name variables)))
@@ -127,6 +129,15 @@
                          (if (stringp answer)
                              (if errback (funcall errback answer) (org-linear--fail "%s" answer))
                            (funcall callback answer))))))
+
+(defun org-linear-test--check-serializable (value)
+  "Signal an error if the alist VALUE holds a nil, at any depth."
+  (when (consp value)
+    (dolist (pair value)
+      (when (consp pair)
+        (when (null (cdr pair))
+          (error "Variable %s is nil, which JSON would send as {}" (car pair)))
+        (org-linear-test--check-serializable (cdr pair))))))
 
 (defun org-linear-test--answer (name variables)
   "Return the data the fake Linear gives for operation NAME with VARIABLES.

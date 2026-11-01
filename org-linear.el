@@ -69,14 +69,15 @@
 
 (defcustom org-linear-file-header
   "#+TITLE: Linear
-#+STARTUP: overview
+#+STARTUP: overview logdrawer
 #+PRIORITIES: A D D
 #+TODO: TRIAGE(r) BACKLOG(b) TODO(t) DOING(g) | DONE(d) CANCELLED(c@)
 "
   "Header written to a new `org-linear-file'.
 Its TODO line must list every keyword that `org-linear-type-keywords' and
 `org-linear-state-keywords' produce, and its priorities must cover
-`org-linear-priorities'."
+`org-linear-priorities'.  Notes must go into a drawer, here through the
+`logdrawer' startup option, or they would count as part of the description."
   :type 'string
   :group 'org-linear)
 
@@ -390,7 +391,7 @@ set are fetched too, so that their edits still sync."
   issues(first: 25, after: $after, filter: $filter, includeArchived: true) {
     pageInfo { hasNextPage endCursor } nodes { %s } } }"
            org-linear--issue-fields)
-   `((filter . ,filter) (after . ,after))
+   `((filter . ,filter) (after . ,(or after :null)))
    (lambda (data)
      (let* ((page (alist-get 'issues data))
             (acc (append acc (alist-get 'nodes page)))
