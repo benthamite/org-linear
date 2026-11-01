@@ -33,6 +33,7 @@ This manual describes the features and customization options for the Emacs Lisp 
 * The file::
 * Syncing::
 * The agenda::
+* Transient menu::
 * User options::
 * Limits::
 * Indices::
@@ -255,6 +256,35 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @lisp
 (setq org-agenda-skip-function-global #'org-linear-agenda-skip)
 @end lisp
+
+@node Transient menu
+@chapter Transient menu
+
+@findex org-linear-menu
+@samp{M-x org-linear-menu} gathers the package's commands in a transient menu. The package binds it to no key, so bind it yourself if you use it often.
+
+@multitable {aaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@headitem Key
+@tab Command
+@tab What it does
+@item @samp{v}
+@tab @code{org-linear-visit}
+@tab Visit the file
+@item @samp{o}
+@tab @code{org-linear-browse}
+@tab Open the issue at point in Linear
+@item @samp{s}
+@tab @code{org-linear-sync}
+@tab Sync now
+@item @samp{a}
+@tab @code{org-linear-auto-sync-mode}
+@tab Turn syncing on save, visit and timer on/off
+@item @samp{l}
+@tab @code{org-linear-show-log}
+@tab Show the sync log
+@end multitable
+
+The @samp{o} key appears only when point is on an issue in the file. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
 
 @node User options
 @chapter User options

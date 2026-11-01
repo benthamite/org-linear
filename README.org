@@ -189,6 +189,24 @@ Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with t
 (setq org-agenda-skip-function-global #'org-linear-agenda-skip)
 #+end_src
 
+* Transient menu
+:PROPERTIES:
+:CUSTOM_ID: h:transient-menu
+:END:
+
+#+findex: org-linear-menu
+=M-x org-linear-menu= gathers the package's commands in a transient menu. The package binds it to no key, so bind it yourself if you use it often.
+
+| Key | Command                     | What it does                                 |
+|-----+-----------------------------+----------------------------------------------|
+| =v= | ~org-linear-visit~          | Visit the file                               |
+| =o= | ~org-linear-browse~         | Open the issue at point in Linear            |
+| =s= | ~org-linear-sync~           | Sync now                                     |
+| =a= | ~org-linear-auto-sync-mode~ | Turn syncing on save, visit and timer on/off |
+| =l= | ~org-linear-show-log~       | Show the sync log                            |
+
+The =o= key appears only when point is on an issue in the file. The =a= key shows whether the mode is on, and the menu stays open after you press it.
+
 * User options
 :PROPERTIES:
 :CUSTOM_ID: h:user-options

@@ -508,6 +508,36 @@ A string is an error message."
     (let ((org-linear-agenda-keep-tags '("joint")))
       (should-not (org-linear-agenda-skip)))))
 
+;;;; Menu
+
+(ert-deftest org-linear-test-menu-commands-exist ()
+  "Every key of the menu runs an existing command."
+  (dolist (entry '(("v" . org-linear-visit) ("o" . org-linear-browse)
+                   ("s" . org-linear-sync) ("a" . org-linear-auto-sync-mode)
+                   ("l" . org-linear-show-log)))
+    (let ((suffix (transient-get-suffix 'org-linear-menu (car entry))))
+      (should (eq (plist-get (cdr suffix) :command) (cdr entry)))
+      (should (commandp (cdr entry))))))
+
+(ert-deftest org-linear-test-menu-issue-predicate ()
+  "The open-issue key is offered only on an entry with a Linear issue."
+  (with-temp-buffer
+    (org-mode)
+    (insert "* An issue\n:PROPERTIES:\n:LINEAR_URL: https://linear.app/x/issue/ENG-1\n:END:\n* A note\n")
+    (goto-char (point-min))
+    (should (org-linear--issue-at-point-p))
+    (goto-char (point-max))
+    (should-not (org-linear--issue-at-point-p)))
+  (with-temp-buffer
+    (should-not (org-linear--issue-at-point-p))))
+
+(ert-deftest org-linear-test-menu-auto-sync-label ()
+  "The auto-sync label shows the mode's state."
+  (let ((org-linear-auto-sync-mode t))
+    (should (equal (org-linear--auto-sync-description) "Auto-sync (on)")))
+  (let ((org-linear-auto-sync-mode nil))
+    (should (equal (org-linear--auto-sync-description) "Auto-sync (off)"))))
+
 ;;;; Safety
 
 (ert-deftest org-linear-test-active-region-ignored ()

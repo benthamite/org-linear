@@ -58,7 +58,7 @@ With `use-package`'s built-in `:vc` keyword (Emacs 30 or later):
      (org-linear-auto-sync-mode))
    ```
 
-4. Run `M-x org-linear-visit`. The file fills in the background; `M-x org-linear-show-log` shows conflicts and errors.
+4. Run `M-x org-linear-visit`. The file fills in the background; `M-x org-linear-show-log` shows conflicts and errors. `M-x org-linear-menu` gathers these commands in a transient menu.
 
 ## Documentation
 

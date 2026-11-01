@@ -5,7 +5,7 @@
 ;; Author: Pablo Stafforini
 ;; URL: https://github.com/benthamite/org-linear
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (org "9.7"))
+;; Package-Requires: ((emacs "29.1") (org "9.7") (transient "0.4"))
 ;; Keywords: outlines, convenience, tools
 
 ;; This file is NOT part of GNU Emacs.
@@ -47,6 +47,7 @@
 (require 'org)
 (require 'seq)
 (require 'subr-x)
+(require 'transient)
 
 (declare-function auth-source-search "auth-source")
 
@@ -200,6 +201,8 @@ For example (\"joint\"), for a team that labels work it shares."
   '("triage" "backlog" "unstarted" "started" "completed" "canceled" "duplicate")
   "Linear's state types in workflow order.")
 
+(defvar org-linear-auto-sync-mode)
+
 (defvar org-linear--state nil
   "Sync state, a plist.
 :tasks is a hash table from issue ID to the issue as it was at the last
@@ -286,6 +289,31 @@ Save the file first, so that its edits are sent."
   "Visit `org-linear-file'."
   (interactive)
   (find-file (org-linear--ensure-file)))
+
+;;;; Menu
+
+;;;###autoload (autoload 'org-linear-menu "org-linear" nil t)
+(transient-define-prefix org-linear-menu ()
+  "Visit the mirrored file and its issues, and control the sync."
+  ["Issues"
+   ("v" "Visit the file" org-linear-visit)
+   ("o" "Open the issue at point in Linear" org-linear-browse
+    :if org-linear--issue-at-point-p)]
+  ["Sync"
+   ("s" "Sync now" org-linear-sync)
+   ("a" org-linear-auto-sync-mode
+    :description org-linear--auto-sync-description
+    :transient t)
+   ("l" "Show the log" org-linear-show-log)])
+
+(defun org-linear--issue-at-point-p ()
+  "Return non-nil if point is in an Org entry with a Linear issue."
+  (and (derived-mode-p 'org-mode)
+       (ignore-errors (org-entry-get nil "LINEAR_URL"))))
+
+(defun org-linear--auto-sync-description ()
+  "Return the menu's label for `org-linear-auto-sync-mode', with its state."
+  (format "Auto-sync (%s)" (if org-linear-auto-sync-mode "on" "off")))
 
 ;;;; Modes
 
