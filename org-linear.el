@@ -193,6 +193,13 @@ A section whose keyword the file does not define is left out."
   :type '(alist :key-type string :value-type string)
   :group 'org-linear)
 
+(defcustom org-linear-my-issues-sync t
+  "Non-nil means `org-linear-my-issues' syncs when it opens.
+The list appears at once from the file and is rebuilt if the sync brings
+changes.  No sync starts while the file has unsaved edits."
+  :type 'boolean
+  :group 'org-linear)
+
 (defcustom org-linear-pandoc-program "pandoc"
   "Pandoc executable used to convert between Markdown and Org."
   :type 'string
@@ -223,6 +230,15 @@ A section whose keyword the file does not define is left out."
 
 (defvar org-linear-auto-sync-mode)
 (defvar org-agenda-custom-commands)
+
+(defvar org-linear--list-buffer nil
+  "The buffer showing `org-linear-my-issues', or nil.")
+
+(defvar org-linear--refresh-list nil
+  "Non-nil means the sync in progress rebuilds the list if it brings changes.")
+
+(defvar org-linear--announce nil
+  "Non-nil means the sync in progress reports its end even if nothing changed.")
 
 (defvar org-linear--agenda-project-width 0
   "Width of the project column in `org-linear-my-issues'.")
@@ -267,12 +283,19 @@ agenda.")
 ;;;; Commands
 
 ;;;###autoload
-(defun org-linear-sync ()
+(defun org-linear-sync (&optional announce)
   "Sync `org-linear-file' with Linear in both directions.
-Save the file first, so that its edits are sent."
-  (interactive)
+Save the file first, so that its edits are sent.  With ANNOUNCE, as when
+called interactively, report the start and the end of the sync even if
+it changes nothing; background syncs report only changes."
+  (interactive (list t))
   (unless org-linear-teams
     (user-error "Set `org-linear-teams' to the keys of the teams to mirror"))
+  (when announce
+    (setq org-linear--announce t)
+    (message (if org-linear--busy
+                 "Linear sync: one is running; another will follow"
+               "Linear sync: started")))
   (if org-linear--busy
       (setq org-linear--pending t)
     (setq org-linear--busy t
@@ -300,7 +323,8 @@ Save the file first, so that its edits are sent."
 Issues assigned to others are left out, as `org-linear-agenda-skip'
 decides, and so are issues scheduled for a later day.  The sections are
 `org-linear-my-issues-sections'.  The list is rebuilt on each call, even
-when `org-agenda-sticky' would reuse it."
+when `org-agenda-sticky' would reuse it, and it then syncs, as
+`org-linear-my-issues-sync' says."
   (interactive)
   (require 'org-agenda)
   (org-linear--load-state)
@@ -320,8 +344,84 @@ when `org-agenda-sticky' would reuse it."
               (org-agenda-prefix-format '((todo . " %(org-linear--agenda-context) ")))
               (org-agenda-todo-keyword-format "")
               (org-agenda-todo-ignore-scheduled 'future)
+              (org-agenda-finalize-hook '(org-linear--list-setup))
               (org-agenda-sorting-strategy '((todo deadline-up priority-down alpha-up))))))))
-    (org-agenda nil "L")))
+    (org-agenda nil "L"))
+  (when org-linear-my-issues-sync
+    (setq org-linear--refresh-list t)
+    (org-linear--timer-sync)
+    (unless org-linear--busy
+      (setq org-linear--refresh-list nil))))
+
+(declare-function org-agenda-todo "org-agenda" (&optional arg))
+(declare-function org-agenda-redo "org-agenda" (&optional all))
+
+(defvar org-linear-my-issues-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "t" #'org-linear-my-issues-todo)
+    map)
+  "Keymap of `org-linear-my-issues-mode'.")
+
+(define-minor-mode org-linear-my-issues-mode
+  "Minor mode for the list of `org-linear-my-issues'.
+Changing an issue's status rebuilds the list, so that the issue moves to
+its new section at once."
+  :keymap org-linear-my-issues-mode-map)
+
+(defun org-linear--list-setup ()
+  "Set up the agenda buffer being built as the list of your issues."
+  (setq org-linear--list-buffer (current-buffer))
+  (org-linear-my-issues-mode 1))
+
+(defun org-linear-my-issues-todo (&optional arg)
+  "Change the status of the issue at point, then rebuild the list.
+Point stays on the same line, which is now the next issue of the section.
+ARG is as in `org-agenda-todo'."
+  (interactive "P")
+  (org-agenda-todo arg)
+  (org-agenda-redo t))
+
+(defun org-linear--refresh-list-after-sync ()
+  "Rebuild the list if this sync was to refresh it and brought changes."
+  (when org-linear--refresh-list
+    (when (and (> (+ (plist-get org-linear--stats :pulled)
+                     (plist-get org-linear--stats :created))
+                  0)
+               (buffer-live-p org-linear--list-buffer))
+      (org-linear--rebuild-list))
+    (unless (or org-linear--pending org-linear--rerun)
+      (setq org-linear--refresh-list nil))))
+
+(defun org-linear--rebuild-list ()
+  "Rebuild the list, keeping point on the issue it was on.
+The list may have shifted under you, and a key pressed next must not act
+on another issue."
+  (let ((rebuild (lambda ()
+                   ;; A copy, since rebuilding resets the list's own markers.
+                   (let ((marker (when-let* ((here (org-get-at-bol 'org-hd-marker)))
+                                   (copy-marker here))))
+                     (org-agenda-redo t)
+                     (org-linear--goto-list-issue marker)
+                     (when marker (set-marker marker nil)))))
+        (window (get-buffer-window org-linear--list-buffer)))
+    ;; Point in a displayed buffer is its window's point.
+    (if window
+        (with-selected-window window (funcall rebuild))
+      (with-current-buffer org-linear--list-buffer (funcall rebuild)))))
+
+(defun org-linear--goto-list-issue (marker)
+  "Move to the line of the list for the heading at MARKER, if there is one."
+  (when marker
+    (let ((found (save-excursion
+                   (goto-char (point-min))
+                   (let (pos)
+                     (while (and (not pos) (not (eobp)))
+                       (let ((here (org-get-at-bol 'org-hd-marker)))
+                         (if (and here (equal here marker))
+                             (setq pos (point))
+                           (forward-line 1))))
+                     pos))))
+      (when found (goto-char found)))))
 
 (defun org-linear--agenda-context ()
   "Return the project and due month and day of the issue at point, for the agenda."
@@ -1320,6 +1420,7 @@ not sent again while later edits still go through."
   (setq org-linear--busy nil
         org-linear--api-key-cache nil)
   (org-linear--report)
+  (org-linear--refresh-list-after-sync)
   (cond
    ((and org-linear--rerun (< org-linear--reruns 2))
     (cl-incf org-linear--reruns)
@@ -1332,7 +1433,9 @@ not sent again while later edits still go through."
   "End the sync with an error described by FORMAT-STRING and ARGS."
   (let ((text (apply #'format format-string args)))
     (org-linear--log "Error: %s" text)
-    (setq org-linear--api-key-cache nil)
+    (setq org-linear--api-key-cache nil
+          org-linear--announce nil
+          org-linear--refresh-list nil)
     (when org-linear--busy
       (setq org-linear--busy nil)
       (message "Linear sync failed: %s (M-x org-linear-show-log)" text)
@@ -1341,15 +1444,21 @@ not sent again while later edits still go through."
 
 (defun org-linear--report ()
   "Report the counts of the sync that ended, if anything happened."
-  (let ((s org-linear--stats))
-    (when (cl-some (lambda (k) (> (plist-get s k) 0))
-                   '(:pulled :pushed :created :conflicts :errors))
+  (let ((s org-linear--stats)
+        (more (or org-linear--pending org-linear--rerun)))
+    (cond
+     ((cl-some (lambda (k) (> (plist-get s k) 0))
+               '(:pulled :pushed :created :conflicts :errors))
       (message "Linear sync: %d from Linear, %d sent, %d created%s"
                (plist-get s :pulled) (plist-get s :pushed) (plist-get s :created)
                (if (> (+ (plist-get s :conflicts) (plist-get s :errors)) 0)
                    (format ", %d conflicts, %d rejected (M-x org-linear-show-log)"
                            (plist-get s :conflicts) (plist-get s :errors))
-                 "")))))
+                 "")))
+     ((and org-linear--announce (not more))
+      (message "Linear sync: done, nothing to change")))
+    (unless more
+      (setq org-linear--announce nil))))
 
 ;;;; Views of an issue
 

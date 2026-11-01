@@ -159,7 +159,7 @@ The file holds every open issue of the teams and the issues closed in the last ~
 :END:
 
 #+findex: org-linear-sync
-=M-x org-linear-sync= saves the file, fetches the teams' issues, merges them with the file and sends the file's changes to Linear. It returns at once; the work runs in the background and a message reports what changed. A sync that changes nothing says nothing, so background syncs stay out of your echo area. The first sync converts every description and comment, so it can take a few minutes; later ones convert only what changed.
+=M-x org-linear-sync= saves the file, fetches the teams' issues, merges them with the file and sends the file's changes to Linear. It returns at once; the work runs in the background and a message reports when it starts and how it ended. A background sync reports only changes, so it stays out of your echo area. The first sync converts every description and comment, so it can take a few minutes; later ones convert only what changed.
 
 The merge is three-way. For each field the sync compares the file and Linear with the issue as it was at the last sync, kept in ~org-linear-state-file~:
 
@@ -185,7 +185,10 @@ A sync never changes the file while it has unsaved edits, and never applies chan
 
 #+findex: org-linear-my-issues
 #+vindex: org-linear-my-issues-sections
-The file holds every open issue of the teams, so it is not the place to see what is yours. =M-x org-linear-my-issues= is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of ~org-linear-my-issues-sections~. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. Each call rebuilds the list, even with ~org-agenda-sticky~ on. From the list, =t= changes an issue's status, =RET= jumps to its heading, =s= saves the file, which sends your changes to Linear, and =g= refreshes the list. Issues scheduled for a later day stay out of it until that day.
+The file holds every open issue of the teams, so it is not the place to see what is yours. =M-x org-linear-my-issues= is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of ~org-linear-my-issues-sections~. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. Each call rebuilds the list, even with ~org-agenda-sticky~ on. From the list, =t= changes an issue's status and rebuilds the list, so the issue moves to its new section and point lands on the next one. =TAB= shows an issue's heading in another window, =C-x C-s= saves the file, which sends your changes to Linear, and =g= refreshes the list. Issues scheduled for a later day stay out of it until that day.
+
+#+vindex: org-linear-my-issues-sync
+The list opens at once from the file and then syncs, unless the file has unsaved edits, and it is rebuilt with point on the same issue if the sync brings changes. Set ~org-linear-my-issues-sync~ to =nil= to turn this off.
 
 Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with the rest of your tasks.
 

@@ -244,6 +244,7 @@ A string is an error message."
           (org-linear-state-file (expand-file-name "state.eld" org-linear-test--dir))
           (org-linear-teams '("ENG"))
           (org-linear-state-keywords '(("Waiting" . "WAITING")))
+          (org-linear-my-issues-sync nil)
           (org-linear-file-header
            "#+TITLE: Linear\n#+PRIORITIES: A D D\n#+TODO: TRIAGE(r) BACKLOG(b) TODO(t) DOING(g) WAITING(w@) | DONE(d) CANCELLED(c@)\n")
           (org-log-into-drawer "STATES")
@@ -976,6 +977,145 @@ A string is an error message."
               (should (string-match-p "Started task" (buffer-string)))))
         (when (get-buffer "*Org Agenda(L)*") (kill-buffer "*Org Agenda(L)*"))
         (when (get-buffer org-agenda-buffer-name) (kill-buffer org-agenda-buffer-name))))))
+
+;;;; Feedback and refreshing the list
+
+(defun org-linear-test--wait ()
+  "Wait until the sync in progress ends."
+  (let ((deadline (+ (float-time) 60)))
+    (while (and org-linear--busy (< (float-time) deadline))
+      (accept-process-output nil 0.05))))
+
+(defmacro org-linear-test--with-messages (var &rest body)
+  "Run BODY with the messages shown so far in the list VAR, newest first."
+  (declare (indent 1))
+  `(let ((,var nil))
+     (cl-letf* ((orig (symbol-function 'message))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (when fmt (push (apply #'format fmt args) ,var))
+                   (apply orig fmt args))))
+       ,@body)))
+
+(defun org-linear-test--list-text ()
+  "Return the text of the list."
+  (with-current-buffer org-linear--list-buffer
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defmacro org-linear-test--with-list (&rest body)
+  "Run BODY with the list open, and close it afterwards."
+  (declare (indent 0))
+  `(unwind-protect
+       (progn (org-linear-my-issues) ,@body)
+     (when (buffer-live-p org-linear--list-buffer)
+       (kill-buffer org-linear--list-buffer))))
+
+(ert-deftest org-linear-test-manual-sync-reports-no-change ()
+  "A sync run by hand says when it starts and ends, even with nothing to do."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--with-messages seen
+      (org-linear-sync t)
+      (org-linear-test--wait)
+      (should (member "Linear sync: started" seen))
+      (should (member "Linear sync: done, nothing to change" seen)))))
+
+(ert-deftest org-linear-test-background-sync-stays-quiet ()
+  "A background sync with nothing to do shows no message."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--with-messages seen
+      (org-linear-test--sync)
+      (should-not (seq-find (lambda (m) (string-prefix-p "Linear sync" m)) seen)))))
+
+(ert-deftest org-linear-test-list-syncs-and-refreshes ()
+  "Opening the list syncs; new issues appear, and point stays on its issue."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let ((org-linear-my-issues-sync nil))
+      (org-linear-test--with-list
+        (with-current-buffer org-linear--list-buffer
+          (should org-linear-my-issues-mode)
+          (should-not (string-match-p "Brand new" (buffer-string))))
+        (puthash "i9" (org-linear-test--issue "i9" "ENG-9" "Brand new" :state "s-triage"
+                                              :assignee "u-pablo" :description "Fresh.")
+                 org-linear-test--issues)
+        (let ((org-linear-my-issues-sync t))
+          (org-linear-my-issues)
+          (with-selected-window (get-buffer-window org-linear--list-buffer)
+            (goto-char (point-min))
+            (search-forward "Joint task")
+            (beginning-of-line))
+          (org-linear-test--wait)
+          (with-selected-window (get-buffer-window org-linear--list-buffer)
+            (should (string-match-p "Brand new" (buffer-string)))
+            (should org-linear-my-issues-mode)
+            (should (string-match-p "Joint task"
+                                    (buffer-substring (line-beginning-position)
+                                                      (line-end-position))))))))))
+
+(ert-deftest org-linear-test-list-sync-skips-unsaved-edits ()
+  "Opening the list does not send edits that are still unsaved."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (with-current-buffer (org-linear--buffer)
+      (org-linear-test--editing
+        (org-linear-test--goto-title "Task one")
+        (org-edit-headline "Half edited")))
+    (let ((org-linear-my-issues-sync t))
+      (setq org-linear-test--calls nil)
+      (org-linear-test--with-list
+        (should-not org-linear--busy)
+        (should-not org-linear--refresh-list)
+        (should-not org-linear-test--calls)
+        (should (buffer-modified-p (org-linear--buffer)))))))
+
+(ert-deftest org-linear-test-list-todo-moves-on ()
+  "Accepting an issue moves it out of Triage and leaves point on the next one."
+  (org-linear-test--with-board
+    (puthash "i7" (org-linear-test--issue "i7" "ENG-7" "Triage A" :state "s-triage"
+                                          :assignee "u-pablo" :description "A.")
+             org-linear-test--issues)
+    (puthash "i8" (org-linear-test--issue "i8" "ENG-8" "Triage B" :state "s-triage"
+                                          :assignee "u-pablo" :description "B.")
+             org-linear-test--issues)
+    (org-linear-test--sync)
+    (org-linear-test--with-list
+      (with-current-buffer org-linear--list-buffer
+        (goto-char (point-min))
+        (search-forward "Triage A")
+        (org-linear-my-issues-todo "TODO")
+        (should org-linear-my-issues-mode)
+        (should (string-match-p "Triage B" (buffer-substring (line-beginning-position)
+                                                             (line-end-position))))
+        (should (string-match-p "To do\n\\(?:.*\n\\)*?.*Triage A" (buffer-string)))))))
+
+(ert-deftest org-linear-test-list-reject-with-reason ()
+  "Rejecting from the list asks for a reason, and the reason is posted."
+  (org-linear-test--with-board
+    (puthash "i7" (org-linear-test--issue "i7" "ENG-7" "Triage A" :state "s-triage"
+                                          :assignee "u-pablo" :description "A.")
+             org-linear-test--issues)
+    (org-linear-test--sync)
+    (org-linear-test--with-list
+      (with-current-buffer org-linear--list-buffer
+        (goto-char (point-min))
+        (search-forward "Triage A")
+        (org-linear-my-issues-todo "CANCELLED")
+        (should-not (string-match-p "Triage A" (buffer-string))))
+      ;; The note buffer opens when the command ends.
+      (run-hooks 'post-command-hook)
+      (with-current-buffer "*Org Note*"
+        (goto-char (point-max))
+        (insert "A duplicate.")
+        (org-ctrl-c-ctrl-c))
+      (with-current-buffer (org-linear--buffer)
+        (let ((org-linear--saving t)) (save-buffer)))
+      (org-linear-test--sync)
+      (let ((issue (gethash "i7" org-linear-test--issues)))
+        (should (equal (alist-get 'type (alist-get 'state issue)) "canceled"))
+        (should (seq-find (lambda (c) (string-match-p "A duplicate" (alist-get 'body c)))
+                          (alist-get 'nodes (alist-get 'comments issue))))))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
