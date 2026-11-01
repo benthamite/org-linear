@@ -182,7 +182,8 @@ Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with t
 
 #+findex: org-linear-agenda-skip
 #+vindex: org-linear-hide-others-in-agenda
-~org-linear-agenda-skip~ hides issues assigned to someone else. Set it as ~org-agenda-skip-function-global~ to apply it to every agenda view; issues with no assignee and issues assigned to you stay. ~org-linear-hide-others-in-agenda~, =t= by default, turns it off without removing it.
+#+vindex: org-linear-agenda-keep-tags
+~org-linear-agenda-skip~ hides issues assigned to someone else. Set it as ~org-agenda-skip-function-global~ to apply it to every agenda view; issues with no assignee and issues assigned to you stay. So do issues with a tag in ~org-linear-agenda-keep-tags~, =nil= by default, which suits a team that labels work it shares, for instance with =joint=. ~org-linear-hide-others-in-agenda~, =t= by default, turns the filter off without removing it.
 
 #+begin_src emacs-lisp
 (setq org-agenda-skip-function-global #'org-linear-agenda-skip)

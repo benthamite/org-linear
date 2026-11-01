@@ -498,6 +498,16 @@ A string is an error message."
     (org-linear-test--goto "ENG-2")
     (should-not (org-linear-agenda-skip))))
 
+(ert-deftest org-linear-test-agenda-keeps-tagged-issues ()
+  "A tag in `org-linear-agenda-keep-tags' keeps others' issues in the agenda."
+  (org-linear-test--with-board
+    (org-linear-test--edit "i2" 'assignee (org-linear-test--user "u-peter"))
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-2")
+    (should (org-linear-agenda-skip))
+    (let ((org-linear-agenda-keep-tags '("joint")))
+      (should-not (org-linear-agenda-skip)))))
+
 ;;;; Safety
 
 (ert-deftest org-linear-test-active-region-ignored ()

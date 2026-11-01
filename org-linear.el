@@ -166,6 +166,12 @@ A user not listed here gets the first word of their name in lower case."
   :type 'boolean
   :group 'org-linear)
 
+(defcustom org-linear-agenda-keep-tags nil
+  "Tags that keep an issue in the agenda even when it is assigned to others.
+For example (\"joint\"), for a team that labels work it shares."
+  :type '(repeat string)
+  :group 'org-linear)
+
 (defcustom org-linear-pandoc-program "pandoc"
   "Pandoc executable used to convert between Markdown and Org."
   :type 'string
@@ -336,11 +342,16 @@ Save the file first, so that its edits are sent."
 
 (defun org-linear-agenda-skip ()
   "Skip issues assigned to others, for `org-agenda-skip-function-global'.
-Issues with no assignee and issues assigned to you stay."
+Issues with no assignee, issues assigned to you and issues with a tag in
+`org-linear-agenda-keep-tags' stay."
   (when (and org-linear-hide-others-in-agenda (org-linear--file-p))
+    (org-linear--load-state)
     (let* ((users (plist-get org-linear--state :user-tags))
-           (people (seq-filter (lambda (tag) (member tag users)) (org-get-tags nil t))))
-      (when (and people (not (member (plist-get org-linear--state :me-tag) people)))
+           (tags (org-get-tags nil t))
+           (people (seq-filter (lambda (tag) (member tag users)) tags)))
+      (when (and people
+                 (not (member (plist-get org-linear--state :me-tag) people))
+                 (not (seq-intersection tags org-linear-agenda-keep-tags)))
         (save-excursion (or (outline-next-heading) (point-max)))))))
 
 ;;;; Fetching from Linear
