@@ -285,10 +285,13 @@ Save the file first, so that its edits are sent."
 (defun org-linear-my-issues ()
   "Show your open issues in an agenda, grouped by status.
 Issues assigned to others are left out, as `org-linear-agenda-skip'
-decides.  The sections are `org-linear-my-issues-sections'."
+decides.  The sections are `org-linear-my-issues-sections'.  The list is
+rebuilt on each call, even when `org-agenda-sticky' would reuse it."
   (interactive)
   (require 'org-agenda)
   (org-linear--load-state)
+  (when-let* ((sticky (get-buffer "*Org Agenda(L)*")))
+    (kill-buffer sticky))
   (let* ((file (org-linear--ensure-file))
          (keywords (with-current-buffer (org-linear--buffer) org-todo-keywords-1))
          (blocks (cl-loop for (header . keyword) in org-linear-my-issues-sections

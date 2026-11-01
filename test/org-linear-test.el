@@ -528,6 +528,24 @@ A string is an error message."
       (when (get-buffer org-agenda-buffer-name)
         (kill-buffer org-agenda-buffer-name)))))
 
+(ert-deftest org-linear-test-my-issues-fresh-with-sticky-agendas ()
+  "With sticky agendas, a second call shows the file's current state."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let ((org-agenda-sticky t))
+      (unwind-protect
+          (progn
+            (org-linear-my-issues)
+            (should (equal (buffer-name) "*Org Agenda(L)*"))
+            (org-linear-test--edit "i1" 'title "Task one, renamed")
+            (org-linear-test--sync)
+            (org-linear-my-issues)
+            (should (string-match-p "Task one, renamed"
+                                    (with-current-buffer "*Org Agenda(L)*"
+                                      (buffer-substring-no-properties (point-min) (point-max))))))
+        (when (get-buffer "*Org Agenda(L)*")
+          (kill-buffer "*Org Agenda(L)*"))))))
+
 ;;;; Menu
 
 (ert-deftest org-linear-test-menu-commands-exist ()
