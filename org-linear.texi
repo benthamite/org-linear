@@ -218,7 +218,7 @@ The file holds every open issue of the teams and the issues closed in the last @
 @chapter Syncing
 
 @findex org-linear-sync
-@samp{M-x org-linear-sync} saves the file, fetches the teams' issues, merges them with the file and sends the file's changes to Linear. It returns at once; the work runs in the background and a message reports what changed.
+@samp{M-x org-linear-sync} saves the file, fetches the teams' issues, merges them with the file and sends the file's changes to Linear. It returns at once; the work runs in the background and a message reports what changed. A sync that changes nothing says nothing, so background syncs stay out of your echo area. The first sync converts every description and comment, so it can take a few minutes; later ones convert only what changed.
 
 The merge is three-way. For each field the sync compares the file and Linear with the issue as it was at the last sync, kept in @code{org-linear-state-file}:
 

@@ -1576,10 +1576,12 @@ Open issues do, and closed ones for `org-linear-closed-retention-days'."
         (find-file-noselect file))))
 
 (defun org-linear--save (buffer)
-  "Save BUFFER without triggering a sync."
+  "Save BUFFER, if it changed, quietly and without triggering a sync."
   (with-current-buffer buffer
-    (let ((org-linear--saving t))
-      (save-buffer))))
+    (when (buffer-modified-p)
+      (let ((org-linear--saving t)
+            (inhibit-message t))
+        (save-buffer)))))
 
 (defun org-linear--state-tasks ()
   "Return the hash table of issue states."
@@ -1626,9 +1628,11 @@ When Linear rejects the key and RETRIED is nil, drop the cached key with
 `org-linear-api-key-forget-command' and try once more."
   (org-linear--with-api-key
    (lambda (key)
-     (let ((body (make-temp-file "org-linear" nil ".json"
-                                 (json-serialize `((query . ,query) (variables . ,variables))
-                                                 :null-object :null :false-object :false))))
+     (let ((body (let ((inhibit-message t)
+                       (message-log-max nil))
+                   (make-temp-file "org-linear" nil ".json"
+                                   (json-serialize `((query . ,query) (variables . ,variables))
+                                                   :null-object :null :false-object :false)))))
        (org-linear--run-process
         (list org-linear-curl-program "-sS" "--max-time" (number-to-string org-linear-timeout)
               "-X" "POST" org-linear-api-url
