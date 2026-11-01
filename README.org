@@ -180,7 +180,7 @@ A sync never changes the file while it has unsaved edits, and never applies chan
 
 #+findex: org-linear-my-issues
 #+vindex: org-linear-my-issues-sections
-The file holds every open issue of the teams, so it is not the place to see what is yours. =M-x org-linear-my-issues= is: it opens an agenda of your open issues, with each one's project and due date, grouped into the sections of ~org-linear-my-issues-sections~. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. Each call rebuilds the list, even with ~org-agenda-sticky~ on. From the list, =t= changes an issue's status, =RET= jumps to its heading, =s= saves the file, which sends your changes to Linear, and =g= refreshes the list.
+The file holds every open issue of the teams, so it is not the place to see what is yours. =M-x org-linear-my-issues= is: it opens an agenda of your open issues, with each one's project and due month and day, grouped into the sections of ~org-linear-my-issues-sections~. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. Each call rebuilds the list, even with ~org-agenda-sticky~ on. From the list, =t= changes an issue's status, =RET= jumps to its heading, =s= saves the file, which sends your changes to Linear, and =g= refreshes the list.
 
 Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with the rest of your tasks.
 

@@ -302,17 +302,19 @@ rebuilt on each call, even when `org-agenda-sticky' would reuse it."
              ((org-agenda-files ',(list file))
               (org-agenda-skip-function-global #'org-linear-agenda-skip)
               (org-agenda-prefix-format '((todo . " %(org-linear--agenda-context) ")))
+              (org-agenda-todo-keyword-format "")
               (org-agenda-sorting-strategy '((todo deadline-up priority-down alpha-up))))))))
     (org-agenda nil "L")))
 
 (defun org-linear--agenda-context ()
-  "Return the project and due date of the issue at point, for the agenda."
-  (format "%-22s %-10s"
-          (truncate-string-to-width
-           (save-excursion
-             (if (org-up-heading-safe) (org-get-heading t t t t) ""))
-           22)
-          (or (org-linear--planning-date "DEADLINE") "")))
+  "Return the project and due month and day of the issue at point, for the agenda."
+  (let ((due (org-linear--planning-date "DEADLINE")))
+    (format "%-16s %-5s"
+            (truncate-string-to-width
+             (save-excursion
+               (if (org-up-heading-safe) (org-get-heading t t t t) ""))
+             16 nil nil "…")
+            (if due (substring due 5) ""))))
 
 ;;;###autoload
 (defun org-linear-browse ()

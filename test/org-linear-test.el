@@ -519,12 +519,31 @@ A string is an error message."
                         (buffer-substring-no-properties (point-min) (point-max)))))
             (should (string-match-p "Task one" text))
             (should (string-match-p "Joint task" text))
-            (should (string-match-p "Project A +2026-11-10" text))
+            (should (string-match-p "Project A +11-10 +\\(?:\\[#B\\] \\)?Task one" text))
+            (let ((case-fold-search nil))
+              (should-not (string-match-p "WAITING" text)))
             (should (string-match-p "Waiting\n\\(?:.*\n\\)*?.*Joint task" text))
             (should (string-match-p "To do\n\\(?:.*\n\\)*?.*Task one" text))
             (should-not (string-match-p "Peter's task" text))
             (should-not (string-match-p "Closed today" text))
             (should-not (string-match-p "Backlog" text))))
+      (when (get-buffer org-agenda-buffer-name)
+        (kill-buffer org-agenda-buffer-name)))))
+
+(ert-deftest org-linear-test-my-issues-status-change ()
+  "Changing a status from the list reaches the heading."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (unwind-protect
+        (progn
+          (org-linear-my-issues)
+          (with-current-buffer org-agenda-buffer-name
+            (goto-char (point-min))
+            (search-forward "Task one")
+            (org-agenda-todo "DOING")
+            (should (string-match-p "Task one" (buffer-string))))
+          (org-linear-test--goto "ENG-1")
+          (should (equal (org-get-todo-state) "DOING")))
       (when (get-buffer org-agenda-buffer-name)
         (kill-buffer org-agenda-buffer-name)))))
 
