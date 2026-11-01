@@ -214,6 +214,9 @@ A section whose keyword the file does not define is left out."
 (defvar org-linear-auto-sync-mode)
 (defvar org-agenda-custom-commands)
 
+(defvar org-linear--agenda-project-width 0
+  "Width of the project column in `org-linear-my-issues'.")
+
 (defvar org-linear--state nil
   "Sync state, a plist.
 :tasks is a hash table from issue ID to the issue as it was at the last
@@ -292,6 +295,8 @@ rebuilt on each call, even when `org-agenda-sticky' would reuse it."
   (org-linear--load-state)
   (when-let* ((sticky (get-buffer "*Org Agenda(L)*")))
     (kill-buffer sticky))
+  (setq org-linear--agenda-project-width
+        (org-linear--longest-project-name (org-linear--buffer)))
   (let* ((file (org-linear--ensure-file))
          (keywords (with-current-buffer (org-linear--buffer) org-todo-keywords-1))
          (blocks (cl-loop for (header . keyword) in org-linear-my-issues-sections
@@ -308,13 +313,22 @@ rebuilt on each call, even when `org-agenda-sticky' would reuse it."
 
 (defun org-linear--agenda-context ()
   "Return the project and due month and day of the issue at point, for the agenda."
-  (let ((due (org-linear--planning-date "DEADLINE")))
-    (format "%-16s %-5s"
-            (truncate-string-to-width
-             (save-excursion
-               (if (org-up-heading-safe) (org-get-heading t t t t) ""))
-             16 nil nil "…")
+  (let ((due (org-linear--planning-date "DEADLINE"))
+        (project (save-excursion
+                   (if (org-up-heading-safe) (org-get-heading t t t t) ""))))
+    (format "%s %-5s"
+            (string-pad project org-linear--agenda-project-width)
             (if due (substring due 5) ""))))
+
+(defun org-linear--longest-project-name (buffer)
+  "Return the length of the longest level-1 heading in BUFFER."
+  (with-current-buffer buffer
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (let ((longest 0))
+       (while (re-search-forward "^\\* " nil t)
+         (setq longest (max longest (length (org-get-heading t t t t)))))
+       longest))))
 
 ;;;###autoload
 (defun org-linear-browse ()

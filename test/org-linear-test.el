@@ -530,6 +530,32 @@ A string is an error message."
       (when (get-buffer org-agenda-buffer-name)
         (kill-buffer org-agenda-buffer-name)))))
 
+(ert-deftest org-linear-test-my-issues-fits-project-names ()
+  "The project column fits the longest name, untruncated, and aligns titles."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--edit "i3" 'state (org-linear-test--state "s-todo"))
+    (org-linear-test--edit "i3" 'completedAt nil)
+    (org-linear-test--edit "i3" 'title "Long project task")
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (goto-char (point-min))
+      (re-search-forward "^\\* Project B")
+      (org-edit-headline "Project B with a rather long name indeed")
+      (let ((org-linear--saving t)) (save-buffer)))
+    (unwind-protect
+        (progn
+          (org-linear-my-issues)
+          (let* ((text (with-current-buffer org-agenda-buffer-name
+                         (buffer-substring-no-properties (point-min) (point-max))))
+                 (column (lambda (title)
+                           (string-match (format "^.*%s" (regexp-quote title)) text)
+                           (- (match-end 0) (match-beginning 0) (length title)))))
+            (should (string-match-p "Project B with a rather long name indeed" text))
+            (should (= (funcall column "Long project task") (funcall column "Joint task")))))
+      (when (get-buffer org-agenda-buffer-name)
+        (kill-buffer org-agenda-buffer-name)))))
+
 (ert-deftest org-linear-test-my-issues-status-change ()
   "Changing a status from the list reaches the heading."
   (org-linear-test--with-board
