@@ -175,7 +175,12 @@ The identifier, the issue's internal ID and its URL are kept in the @samp{LINEAR
 
 Tags that name neither a team member nor a label are yours: the sync leaves them alone and never sends them. A label's tag is its name with every character Org does not allow in tags replaced by @samp{_}, so the label @samp{requested-by:peter} becomes the tag @samp{requested_by_peter}.
 
-@samp{SCHEDULED} is not synced, since Linear issues have no start date. Use it freely to defer an issue in your own agenda.
+Linear issues have no start date, so by default @samp{SCHEDULED} is not synced: use it freely to defer an issue in your own agenda.
+
+@vindex org-linear-start-date-label
+A team can stand in for a start date with a @samp{Start: YYYY-MM-DD} first line in the description and a label. Set @code{org-linear-start-date-label} to that label's name, such as @samp{"deferred"}, and @samp{SCHEDULED} syncs both ways with the two of them. A date in the file then shows as @samp{SCHEDULED} alone: the line leaves the body, and the label's tag leaves the tags. Setting, moving or removing @samp{SCHEDULED} rewrites the line and sets or removes the label on Linear, and for an issue in triage it also snoozes the issue until that date, or ends the snooze. Nothing is written when you turn the option on, unless a synced heading already has a @samp{SCHEDULED} of its own: that date is sent.
+
+Every @samp{SCHEDULED} on a synced issue is then visible to your team, and the label stays after the date passes, until someone removes the date. A Linear view that hides the label keeps hiding the issue until then.
 
 @node Workflow states and keywords
 @section Workflow states and keywords
@@ -248,7 +253,7 @@ A sync never changes the file while it has unsaved edits, and never applies chan
 
 @findex org-linear-my-issues
 @vindex org-linear-my-issues-sections
-The file holds every open issue of the teams, so it is not the place to see what is yours. @samp{M-x org-linear-my-issues} is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of @code{org-linear-my-issues-sections}. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. Each call rebuilds the list, even with @code{org-agenda-sticky} on. From the list, @samp{t} changes an issue's status, @samp{RET} jumps to its heading, @samp{s} saves the file, which sends your changes to Linear, and @samp{g} refreshes the list.
+The file holds every open issue of the teams, so it is not the place to see what is yours. @samp{M-x org-linear-my-issues} is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of @code{org-linear-my-issues-sections}. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. Each call rebuilds the list, even with @code{org-agenda-sticky} on. From the list, @samp{t} changes an issue's status, @samp{RET} jumps to its heading, @samp{s} saves the file, which sends your changes to Linear, and @samp{g} refreshes the list. Issues scheduled for a later day stay out of it until that day.
 
 Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadlines with the rest of your tasks.
 

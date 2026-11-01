@@ -152,6 +152,16 @@ A user not listed here gets the first word of their name in lower case."
   :type '(alist :key-type string :value-type string)
   :group 'org-linear)
 
+(defcustom org-linear-start-date-label nil
+  "Label that marks an issue as having a start date, or nil for none.
+Linear issues have no start date.  When this is a label's name, such as
+\"deferred\", `SCHEDULED' syncs with a \"Start: YYYY-MM-DD\" first line in
+the description plus this label, and neither appears in the heading: the
+line leaves the body, and the label's tag leaves the tags while the date
+is set.  When it is nil, `SCHEDULED' stays in the file and is never sent."
+  :type '(choice (const :tag "Do not sync SCHEDULED" nil) string)
+  :group 'org-linear)
+
 (defcustom org-linear-closed-retention-days 7
   "Days a closed issue stays in the file after it was closed."
   :type 'integer
@@ -204,7 +214,7 @@ A section whose keyword the file does not define is left out."
 ;;;; Internal state
 
 (defconst org-linear--fields
-  '(:title :todo :priority :tags :deadline :project :body)
+  '(:title :todo :priority :tags :deadline :scheduled :project :body)
   "Issue fields merged between the file and Linear.")
 
 (defconst org-linear--type-order
@@ -288,8 +298,9 @@ Save the file first, so that its edits are sent."
 (defun org-linear-my-issues ()
   "Show your open issues in an agenda, grouped by status.
 Issues assigned to others are left out, as `org-linear-agenda-skip'
-decides.  The sections are `org-linear-my-issues-sections'.  The list is
-rebuilt on each call, even when `org-agenda-sticky' would reuse it."
+decides, and so are issues scheduled for a later day.  The sections are
+`org-linear-my-issues-sections'.  The list is rebuilt on each call, even
+when `org-agenda-sticky' would reuse it."
   (interactive)
   (require 'org-agenda)
   (org-linear--load-state)
@@ -308,6 +319,7 @@ rebuilt on each call, even when `org-agenda-sticky' would reuse it."
               (org-agenda-skip-function-global #'org-linear-agenda-skip)
               (org-agenda-prefix-format '((todo . " %(org-linear--agenda-context) ")))
               (org-agenda-todo-keyword-format "")
+              (org-agenda-todo-ignore-scheduled 'future)
               (org-agenda-sorting-strategy '((todo deadline-up priority-down alpha-up))))))))
     (org-agenda nil "L")))
 
@@ -702,10 +714,13 @@ comments included, since it will be inserted again."
     (dolist (task (alist-get 'tasks data))
       (let* ((id (alist-get 'id task))
              (base (and (gethash id present) (gethash id tasks)))
-             (md (alist-get 'description task)))
+             (md (alist-get 'description task))
+             ;; With the option turned off, a stored body lacks the Start
+             ;; line its description has, so it has to be converted afresh.
+             (stale (and (not org-linear-start-date-label) (plist-get base :scheduled))))
         (when (and (or (gethash id present) (org-linear--in-scope-p task))
-                   (not (equal md (plist-get base :desc-md))))
-          (push (cons (cons 'desc id) md) items))))
+                   (or stale (not (equal md (plist-get base :desc-md)))))
+          (push (cons (cons 'desc id) (cdr (org-linear--split-description md))) items))))
     (dolist (comment (alist-get 'comments data))
       (let ((issue (alist-get 'issue_id comment)))
         (unless (or (alist-get 'parent_id comment)
@@ -874,6 +889,7 @@ Apply Linear's changes to the heading and return the edits to send.
 CONVERTED, COMMENTS, PROJECTS and INDEX are as in
 `org-linear--apply-task'."
   (let* ((id (alist-get 'id task))
+         (base (org-linear--migrate-start-line marker base))
          (remote (org-linear--remote-view task converted base))
          (local (org-linear--local-view marker))
          (base (or base (org-linear--base-from-local local marker)))
@@ -912,7 +928,9 @@ BASE its state."
   (let ((id (alist-get 'id task))
         ops)
     (when pushed
-      (push (list :type 'update :id id :team (alist-get 'team_id task) :fields pushed) ops))
+      (push (list :type 'update :id id :team (alist-get 'team_id task) :fields pushed
+                  :label-ids (alist-get 'label_ids task))
+            ops))
     (dolist (note (org-linear--local-notes marker))
       (unless (member (org-linear--note-key (cdr note)) (plist-get base :note-keys))
         (push (list :type 'note :id id :text (org-linear--note-text note)
@@ -957,6 +975,79 @@ BASE its state."
                   (mapcar (lambda (team) (alist-get 'id team))
                           (alist-get 'nodes (alist-get 'teams project))))
         (car team-ids))))
+
+;;;; Start dates
+
+(defconst org-linear--start-line-regexp
+  "\\`Start: \\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)[ \t]*\\(?:\n[ \t\n]*\\|\\'\\)"
+  "Regexp matching the Start line at the beginning of a description or body.")
+
+(defun org-linear--split-description (text)
+  "Return (START . REST) for TEXT, a description or an issue's body.
+START is the date on its Start line and REST the text without that line.
+With `org-linear-start-date-label' nil, no line counts as a Start line."
+  (let ((text (or text "")))
+    (if (and org-linear-start-date-label
+             (string-match org-linear--start-line-regexp text))
+        (cons (match-string 1 text) (substring text (match-end 0)))
+      (cons nil text))))
+
+(defun org-linear--join-description (start text)
+  "Return the description TEXT with a Start line for the date START, if any."
+  (cond ((null start) text)
+        ((string-blank-p text) (format "Start: %s" start))
+        (t (format "Start: %s\n\n%s" start text))))
+
+(defun org-linear--start-tag ()
+  "Return the tag of `org-linear-start-date-label', or nil."
+  (and org-linear-start-date-label
+       (org-linear--sanitize-tag org-linear-start-date-label)))
+
+(defun org-linear--without-start-tag (tags start)
+  "Return TAGS without the start label's tag if the date START is set."
+  (if start (remove (org-linear--start-tag) tags) tags))
+
+(defun org-linear--with-start-label (input label-ids start changed)
+  "Return the issue INPUT with its label IDs agreeing with the date START.
+LABEL-IDS are the issue's labels, used when INPUT sets none.  CHANGED
+means START is a new value.  Nothing is added to an INPUT that changes
+neither labels nor the date, and without a date the label is removed only
+when CHANGED, since a label set by hand may stand without one."
+  (let ((in-input (assq 'labelIds input)))
+    (if (not (and org-linear-start-date-label (or changed in-input)))
+        input
+      (let* ((label (seq-find (lambda (label)
+                                (equal (alist-get 'name label) org-linear-start-date-label))
+                              (plist-get org-linear--meta :labels)))
+             (id (alist-get 'id label))
+             (ids (if in-input (append (cdr in-input) nil) label-ids)))
+        (unless (or label (null start))
+          (org-linear--log "Not labelled: no label named %s exists in Linear"
+                           org-linear-start-date-label))
+        (cond ((and start id) (setq ids (seq-uniq (cons id ids))))
+              ((and changed id) (setq ids (remove id ids))))
+        (cons (cons 'labelIds (vconcat ids)) (assq-delete-all 'labelIds (copy-alist input)))))))
+
+(defun org-linear--snooze-input (keyword start team)
+  "Return the input that snoozes an issue with KEYWORD until the date START.
+This applies only to a state of TEAM of the triage type, where Linear
+keeps a snoozed issue out of the inbox.  With START nil, it ends a snooze."
+  (when (and org-linear-start-date-label
+             (equal (alist-get 'type (org-linear--keyword-state keyword team)) "triage"))
+    `((snoozedUntilAt . ,(if start (concat start "T00:00:00.000Z") :null)))))
+
+(defun org-linear--migrate-start-line (marker base)
+  "Return BASE with any Start line taken out of its body and the heading's.
+A body stored while `org-linear-start-date-label' was nil holds the line.
+The date itself arrives as a change from Linear.  MARKER is the heading."
+  (let ((split (org-linear--split-description (plist-get base :body))))
+    (if (null (car split))
+        base
+      (org-with-point-at marker
+        (let ((local (org-linear--split-description (org-linear--body))))
+          (when (car local)
+            (org-linear--set-body (cdr local)))))
+      (plist-put (copy-sequence base) :body (cdr split)))))
 
 ;;;; Sending edits
 
@@ -1008,16 +1099,37 @@ changed since the sync read it."
 (defun org-linear--update-input (op callback)
   "Call CALLBACK with the IssueUpdateInput for OP's fields, or nil if none.
 A field that cannot be sent is logged and left out."
-  (let ((team (plist-get op :team))
-        (body (assq :body (plist-get op :fields)))
-        input)
-    (dolist (field (plist-get op :fields))
+  (let* ((team (plist-get op :team))
+         (fields (plist-get op :fields))
+         (body (assq :body fields))
+         (start-field (assq :scheduled fields))
+         (base (gethash (plist-get op :id) (org-linear--state-tasks)))
+         (start (if start-field
+                    (cdr start-field)
+                  (and org-linear-start-date-label (plist-get base :scheduled))))
+         input)
+    (dolist (field fields)
       (setq input (append input (org-linear--field-input (car field) (cdr field) team))))
-    (if body
-        (org-linear--org-to-md
-         (cdr body)
-         (lambda (md) (funcall callback (cons (cons 'description md) input))))
-      (funcall callback input))))
+    (setq input (org-linear--with-start-label input (plist-get op :label-ids) start
+                                              (and start-field t)))
+    (when start-field
+      (setq input (append input (org-linear--snooze-input
+                                 (or (cdr (assq :todo fields)) (plist-get base :todo))
+                                 start team))))
+    (cond
+     (body
+      (org-linear--org-to-md
+       (cdr body)
+       (lambda (md)
+         (funcall callback (cons (cons 'description (org-linear--join-description start md))
+                                 input)))))
+     (start-field
+      (funcall callback
+               (cons (cons 'description
+                           (org-linear--join-description
+                            start (cdr (org-linear--split-description (plist-get base :desc-md)))))
+                     input)))
+     (t (funcall callback input)))))
 
 (defun org-linear--field-input (field value team)
   "Return the IssueUpdateInput entries that set FIELD to VALUE in TEAM."
@@ -1031,7 +1143,7 @@ A field that cannot be sent is logged and left out."
     (:deadline `((dueDate . ,(or value :null))))
     (:project `((projectId . ,(or value :null))))
     (:tags (org-linear--tags-input value))
-    (:body nil)))
+    ((or :body :scheduled) nil)))
 
 (defun org-linear--tags-input (tags)
   "Return the assignee and label entries that TAGS stand for."
@@ -1078,25 +1190,48 @@ A field that cannot be sent is logged and left out."
         (team (plist-get op :team)))
     (org-linear--org-to-md
      (plist-get view :body)
-     (lambda (md)
-       (let ((input (append `((teamId . ,team) (title . ,(plist-get view :title))
-                              (description . ,md))
-                            (org-linear--field-input :todo (plist-get view :todo) team)
-                            (org-linear--field-input :priority (plist-get view :priority) team)
-                            (when (plist-get view :deadline)
-                              (org-linear--field-input :deadline (plist-get view :deadline) team))
-                            (when (plist-get view :project)
-                              (org-linear--field-input :project (plist-get view :project) team))
-                            (org-linear--tags-input (plist-get view :tags)))))
+     (lambda (body-md)
+       (let* ((start (plist-get view :scheduled))
+              (md (org-linear--join-description start body-md))
+              (input (org-linear--with-start-label
+                      (append `((teamId . ,team) (title . ,(plist-get view :title))
+                                (description . ,md))
+                              (org-linear--field-input :todo (plist-get view :todo) team)
+                              (org-linear--field-input :priority (plist-get view :priority) team)
+                              (when (plist-get view :deadline)
+                                (org-linear--field-input :deadline (plist-get view :deadline) team))
+                              (when (plist-get view :project)
+                                (org-linear--field-input :project (plist-get view :project) team))
+                              (org-linear--tags-input (plist-get view :tags)))
+                      nil start (and start t))))
          (org-linear--graphql
           (format "mutation OrgLinearCreate($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { %s } } }" org-linear--issue-fields)
           `((input . ,input))
           (lambda (data)
-            (org-linear--link-created (plist-get op :marker) view md
-                                      (org-linear--task (alist-get 'issue (alist-get 'issueCreate data))))
-            (funcall next))
+            (let ((task (org-linear--task (alist-get 'issue (alist-get 'issueCreate data)))))
+              (org-linear--link-created (plist-get op :marker) view md task)
+              (if-let* ((snooze (and start (org-linear--snooze-input (plist-get view :todo) start team))))
+                  (org-linear--snooze-created task snooze next)
+                (funcall next))))
           (org-linear--rejected-handler op next)))))))
+
+(defun org-linear--snooze-created (task snooze next)
+  "Send SNOOZE for the newly created TASK, then call NEXT.
+Peter's task script snoozes a new issue in a second call, so this does
+too.  The issue exists by now, so a refusal is only logged."
+  (let ((id (alist-get 'id task)))
+    (org-linear--graphql
+     "mutation OrgLinearUpdate($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) { success issue { updatedAt description } } }"
+     `((id . ,id) (input . ,snooze))
+     (lambda (result)
+       (org-linear--after-write id (gethash id (org-linear--state-tasks))
+                                (alist-get 'updatedAt (alist-get 'issue (alist-get 'issueUpdate result))))
+       (funcall next))
+     (lambda (message &rest _)
+       (org-linear--log "Not snoozed: %s: %s" (alist-get 'identifier task) message)
+       (funcall next)))))
 
 (defun org-linear--link-created (marker view md task)
   "Record TASK, created from VIEW at MARKER and sent with description MD."
@@ -1222,28 +1357,34 @@ not sent again while later edits still go through."
   "Return TASK from Linear as Org field values.
 CONVERTED maps conversion keys to Org text; BASE supplies the body when
 the description is unchanged."
-  (list :title (alist-get 'title task)
-        :todo (org-linear--state-keyword (alist-get 'status task) (alist-get 'state_type task))
-        :priority (cdr (assq (alist-get 'priority task) org-linear-priorities))
-        :tags (org-linear--remote-tags task)
-        :deadline (alist-get 'due task)
-        :project (alist-get 'project_id task)
-        :body (or (gethash (cons 'desc (alist-get 'id task)) converted)
-                  (plist-get base :body)
-                  "")))
+  (let ((start (car (org-linear--split-description (alist-get 'description task)))))
+    (list :title (alist-get 'title task)
+          :todo (org-linear--state-keyword (alist-get 'status task) (alist-get 'state_type task))
+          :priority (cdr (assq (alist-get 'priority task) org-linear-priorities))
+          :tags (org-linear--without-start-tag (org-linear--remote-tags task) start)
+          :deadline (alist-get 'due task)
+          :scheduled start
+          :project (alist-get 'project_id task)
+          :body (or (gethash (cons 'desc (alist-get 'id task)) converted)
+                    (plist-get base :body)
+                    ""))))
 
 (defun org-linear--local-view (marker)
   "Return the issue at MARKER as Org field values."
   (org-with-point-at marker
-    (list :title (org-get-heading t t t t)
-          :todo (org-get-todo-state)
-          :priority (org-linear--heading-priority)
-          :tags (sort (seq-filter (lambda (tag) (member tag (org-linear--managed-tags)))
-                                  (org-get-tags nil t))
-                      #'string<)
-          :deadline (org-linear--planning-date "DEADLINE")
-          :project (org-linear--heading-project)
-          :body (org-linear--body))))
+    (let ((start (and org-linear-start-date-label (org-linear--planning-date "SCHEDULED"))))
+      (list :title (org-get-heading t t t t)
+            :todo (org-get-todo-state)
+            :priority (org-linear--heading-priority)
+            :tags (org-linear--without-start-tag
+                   (sort (seq-filter (lambda (tag) (member tag (org-linear--managed-tags)))
+                                     (org-get-tags nil t))
+                         #'string<)
+                   start)
+            :deadline (org-linear--planning-date "DEADLINE")
+            :scheduled start
+            :project (org-linear--heading-project)
+            :body (org-linear--body)))))
 
 (defun org-linear--base-from-local (local marker)
   "Return a first sync state for the heading at MARKER whose fields are LOCAL.
@@ -1416,6 +1557,7 @@ project headings."
                                                (lambda (tag) (member tag (org-linear--managed-tags)))
                                                (org-get-tags nil t)))))
            (:deadline (org-linear--set-planning 'deadline value))
+           (:scheduled (org-linear--set-planning 'scheduled value))
            (:body (org-linear--set-body value)))))))
 
 (defun org-linear--set-todo (keyword completed)
@@ -1506,7 +1648,9 @@ COMPLETED is its closing date, or nil."
                                  (format-time-string "CLOSED: [%Y-%m-%d %a]"
                                                      (date-to-time (concat completed "T12:00:00"))))
                                (when (plist-get view :deadline)
-                                 (format "DEADLINE: %s" (org-linear--stamp (plist-get view :deadline))))))
+                                 (format "DEADLINE: %s" (org-linear--stamp (plist-get view :deadline))))
+                               (when (plist-get view :scheduled)
+                                 (format "SCHEDULED: %s" (org-linear--stamp (plist-get view :scheduled))))))
                    " ")))
     (concat "** " (plist-get view :todo) " "
             (when (plist-get view :priority) (format "[#%s] " (plist-get view :priority)))

@@ -41,7 +41,8 @@
 
 (defconst org-linear-test--labels
   '(((id . "l-joint") (name . "joint") (team . ((id . "t1"))))
-    ((id . "l-req") (name . "requested-by:peter") (team . nil)))
+    ((id . "l-req") (name . "requested-by:peter") (team . nil))
+    ((id . "l-def") (name . "deferred") (team . nil)))
   "Fake labels.")
 
 (defun org-linear-test--tick ()
@@ -220,6 +221,7 @@ A string is an error message."
           ('stateId (setf (alist-get 'state issue) (org-linear-test--state value)))
           ('priority (setf (alist-get 'priority issue) value))
           ('dueDate (setf (alist-get 'dueDate issue) value))
+          ('snoozedUntilAt (setf (alist-get 'snoozedUntilAt issue) value))
           ('assigneeId (setf (alist-get 'assignee issue) (org-linear-test--user value)))
           ('projectId (setf (alist-get 'project issue) (and value `((id . ,value)))))
           ('labelIds (setf (alist-get 'labels issue)
@@ -767,6 +769,213 @@ A string is an error message."
      "q" nil #'ignore (lambda (message) (setq reported message)) nil 0
      "{\"errors\":[{\"message\":\"Entity not found\"}]}\n200" "")
     (should (equal reported "Entity not found"))))
+
+;;;; Start dates
+
+(defun org-linear-test--seed-started ()
+  "Add a deferred issue i7, and a triage one i8, to the fake board."
+  (puthash "i7" (org-linear-test--issue "i7" "ENG-7" "Deferred task" :assignee "u-pablo"
+                                        :labels '("l-def" "l-joint")
+                                        :description "Start: 2099-12-05\n\nThe body.")
+           org-linear-test--issues)
+  (puthash "i8" (org-linear-test--issue "i8" "ENG-8" "Triage task" :state "s-triage"
+                                        :assignee "u-pablo" :description "Inbox.")
+           org-linear-test--issues))
+
+(defun org-linear-test--issue-labels (id)
+  "Return the label IDs of fake issue ID."
+  (mapcar (lambda (label) (alist-get 'id label))
+          (alist-get 'nodes (alist-get 'labels (gethash id org-linear-test--issues)))))
+
+(defun org-linear-test--goto-title (title)
+  "Move to the heading TITLE in the sync buffer."
+  (goto-char (point-min))
+  (re-search-forward (concat "^\\*\\* .*" (regexp-quote title)))
+  (org-back-to-heading t))
+
+(ert-deftest org-linear-test-start-pulled-as-scheduled ()
+  "A Start line becomes SCHEDULED; neither it nor the label shows in the heading."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Deferred task")
+        (should (equal (org-linear--planning-date "SCHEDULED") "2099-12-05"))
+        (should (equal (org-linear--body) "The body."))
+        (should (member "joint" (org-get-tags nil t)))
+        (should-not (member "deferred" (org-get-tags nil t))))
+      (setq org-linear-test--calls nil)
+      (org-linear-test--sync)
+      (should-not (assoc "OrgLinearUpdate" org-linear-test--calls)))))
+
+(ert-deftest org-linear-test-start-off-by-default ()
+  "With the option nil, the line and tag stay, and SCHEDULED is not sent."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (org-linear-test--sync)
+    (with-current-buffer (org-linear--buffer)
+      (org-linear-test--goto-title "Deferred task")
+      (should (member "deferred" (org-get-tags nil t)))
+      (should (string-prefix-p "Start: 2099-12-05" (org-linear--body)))
+      (org-linear-test--goto-title "Task one")
+      (org-add-planning-info 'scheduled (date-to-time "2099-01-01T12:00:00"))
+      (save-buffer))
+    (setq org-linear-test--calls nil)
+    (org-linear-test--sync)
+    (should-not (assoc "OrgLinearUpdate" org-linear-test--calls))))
+
+(ert-deftest org-linear-test-start-pushed-from-scheduled ()
+  "Setting SCHEDULED writes the line and label; the body is kept."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Joint task")
+        (org-add-planning-info 'scheduled (date-to-time "2099-03-04T12:00:00"))
+        (save-buffer))
+      (org-linear-test--sync)
+      (let ((issue (gethash "i2" org-linear-test--issues)))
+        (should (equal (alist-get 'description issue) "Start: 2099-03-04\n\nJoint."))
+        (should (equal (sort (org-linear-test--issue-labels "i2") #'string<) '("l-def" "l-joint"))))
+      (setq org-linear-test--calls nil)
+      (org-linear-test--sync)
+      (should-not (assoc "OrgLinearUpdate" org-linear-test--calls)))))
+
+(ert-deftest org-linear-test-start-removed-and-changed ()
+  "Moving SCHEDULED rewrites the line; removing it drops line and label only."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Deferred task")
+        (org-add-planning-info 'scheduled (date-to-time "2099-12-20T12:00:00"))
+        (save-buffer))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash "i7" org-linear-test--issues))
+                     "Start: 2099-12-20\n\nThe body."))
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Deferred task")
+        (org-add-planning-info nil nil 'scheduled)
+        (save-buffer))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash "i7" org-linear-test--issues)) "The body."))
+      (should (equal (org-linear-test--issue-labels "i7") '("l-joint"))))))
+
+(ert-deftest org-linear-test-start-with-body-edit ()
+  "Editing the body keeps the Start line on Linear."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Deferred task")
+        (org-linear--set-body "New body.")
+        (save-buffer))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash "i7" org-linear-test--issues))
+                     "Start: 2099-12-05\n\nNew body."))
+      (should (member "l-def" (org-linear-test--issue-labels "i7"))))))
+
+(ert-deftest org-linear-test-start-changed-in-linear ()
+  "A Start line added, moved or removed in Linear reaches SCHEDULED."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (org-linear-test--edit "i7" 'description "The body.")
+      (org-linear-test--edit "i2" 'description "Start: 2099-02-02\n\nJoint.")
+      (org-linear-test--sync)
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Deferred task")
+        (should-not (org-entry-get nil "SCHEDULED"))
+        (org-linear-test--goto-title "Joint task")
+        (should (equal (org-linear--planning-date "SCHEDULED") "2099-02-02"))
+        (should (equal (org-linear--body) "Joint."))))))
+
+(ert-deftest org-linear-test-start-migration ()
+  "Turning the option on moves existing lines and tags without writing to Linear."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (org-linear-test--sync)
+    (let ((org-linear-start-date-label "deferred"))
+      (setq org-linear-test--calls nil)
+      (org-linear-test--sync)
+      (should-not (assoc "OrgLinearUpdate" org-linear-test--calls))
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Deferred task")
+        (should (equal (org-linear--planning-date "SCHEDULED") "2099-12-05"))
+        (should (equal (org-linear--body) "The body."))
+        (should-not (member "deferred" (org-get-tags nil t))))
+      (org-linear-test--sync)
+      (should-not (assoc "OrgLinearUpdate" org-linear-test--calls)))
+    ;; Turning it off restores the line to the body, again without a write.
+    (org-linear-test--sync)
+    (should-not (assoc "OrgLinearUpdate" org-linear-test--calls))
+    (with-current-buffer (org-linear--buffer)
+      (org-linear-test--goto-title "Deferred task")
+      (should (string-prefix-p "Start: 2099-12-05" (org-linear--body)))
+      (should (member "deferred" (org-get-tags nil t))))))
+
+(ert-deftest org-linear-test-start-snoozes-triage ()
+  "SCHEDULED on a triage issue also snoozes it; removing it ends the snooze."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Triage task")
+        (org-add-planning-info 'scheduled (date-to-time "2099-04-04T12:00:00"))
+        (save-buffer))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'snoozedUntilAt (gethash "i8" org-linear-test--issues))
+                     "2099-04-04T00:00:00.000Z"))
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Triage task")
+        (org-add-planning-info nil nil 'scheduled)
+        (save-buffer))
+      (org-linear-test--sync)
+      (should-not (alist-get 'snoozedUntilAt (gethash "i8" org-linear-test--issues))))))
+
+(ert-deftest org-linear-test-start-on-new-heading ()
+  "A new heading with SCHEDULED is created with the line and the label."
+  (org-linear-test--with-board
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (with-current-buffer (org-linear--buffer)
+        (org-linear-test--goto-title "Task one")
+        (org-end-of-subtree t t)
+        (insert "** TODO Fresh task\nSCHEDULED: <2099-05-05 Tue>\nFresh body.\n")
+        (save-buffer))
+      (org-linear-test--sync)
+      (let ((issue (seq-find (lambda (i) (equal (alist-get 'title i) "Fresh task"))
+                             (hash-table-values org-linear-test--issues))))
+        (should (equal (alist-get 'description issue) "Start: 2099-05-05\n\nFresh body."))
+        (should (member "l-def" (org-linear-test--issue-labels (alist-get 'id issue)))))
+      (setq org-linear-test--calls nil)
+      (org-linear-test--sync)
+      (should-not (assoc "OrgLinearUpdate" org-linear-test--calls)))))
+
+(ert-deftest org-linear-test-my-issues-hides-future-scheduled ()
+  "The list leaves out issues scheduled for a later day, and shows past ones."
+  (org-linear-test--with-board
+    (org-linear-test--seed-started)
+    (puthash "i9" (org-linear-test--issue "i9" "ENG-9" "Started task" :assignee "u-pablo"
+                                          :labels '("l-def")
+                                          :description "Start: 2020-01-01\n\nOld.")
+             org-linear-test--issues)
+    (let ((org-linear-start-date-label "deferred"))
+      (org-linear-test--sync)
+      (unwind-protect
+          (progn
+            (org-linear-my-issues)
+            (with-current-buffer org-agenda-buffer-name
+              (should-not (string-match-p "Deferred task" (buffer-string)))
+              (should (string-match-p "Started task" (buffer-string)))))
+        (when (get-buffer "*Org Agenda(L)*") (kill-buffer "*Org Agenda(L)*"))
+        (when (get-buffer org-agenda-buffer-name) (kill-buffer org-agenda-buffer-name))))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
