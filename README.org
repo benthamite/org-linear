@@ -28,7 +28,7 @@ Its capabilities fall into four groups:
 - The file: how issues, projects and their fields appear in Org ([[#h:the-file][The file]]).
 - Syncing: when a sync runs, how it merges, and what happens on conflicts ([[#h:syncing][Syncing]]).
 - Setup: the API key, the teams and the mappings ([[#h:user-options][User options]]).
-- The agenda: seeing your issues' deadlines with the rest of your tasks ([[#h:agenda][The agenda]]).
+- The agenda: a single command that lists your open issues, and your deadlines among your other tasks ([[#h:agenda][The agenda]]).
 
 * Installation
 :PROPERTIES:
@@ -178,6 +178,10 @@ A sync never changes the file while it has unsaved edits, and never applies chan
 :CUSTOM_ID: h:agenda
 :END:
 
+#+findex: org-linear-my-issues
+#+vindex: org-linear-my-issues-sections
+The file holds every open issue of the teams, so it is not the place to see what is yours. =M-x org-linear-my-issues= is: it opens an agenda of your open issues, with each one's project and due date, grouped into the sections of ~org-linear-my-issues-sections~. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. From the list, =t= changes an issue's status, =RET= jumps to its heading, =s= saves the file, which sends your changes to Linear, and =g= refreshes the list.
+
 Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with the rest of your tasks.
 
 #+findex: org-linear-agenda-skip
@@ -199,6 +203,7 @@ Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with t
 
 | Key | Command                     | What it does                                 |
 |-----+-----------------------------+----------------------------------------------|
+| =m= | ~org-linear-my-issues~      | Show your open issues                        |
 | =v= | ~org-linear-visit~          | Visit the file                               |
 | =o= | ~org-linear-browse~         | Open the issue at point in Linear            |
 | =s= | ~org-linear-sync~           | Sync now                                     |

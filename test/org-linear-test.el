@@ -508,15 +508,36 @@ A string is an error message."
     (let ((org-linear-agenda-keep-tags '("joint")))
       (should-not (org-linear-agenda-skip)))))
 
+(ert-deftest org-linear-test-my-issues ()
+  "The view groups your open issues by status and leaves out others'."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (unwind-protect
+        (progn
+          (org-linear-my-issues)
+          (let ((text (with-current-buffer org-agenda-buffer-name
+                        (buffer-substring-no-properties (point-min) (point-max)))))
+            (should (string-match-p "Task one" text))
+            (should (string-match-p "Joint task" text))
+            (should (string-match-p "Project A +2026-11-10" text))
+            (should (string-match-p "Waiting\n\\(?:.*\n\\)*?.*Joint task" text))
+            (should (string-match-p "To do\n\\(?:.*\n\\)*?.*Task one" text))
+            (should-not (string-match-p "Peter's task" text))
+            (should-not (string-match-p "Closed today" text))
+            (should-not (string-match-p "Backlog" text))))
+      (when (get-buffer org-agenda-buffer-name)
+        (kill-buffer org-agenda-buffer-name)))))
+
 ;;;; Menu
 
 (ert-deftest org-linear-test-menu-commands-exist ()
   "Every key of the menu runs an existing command."
-  (dolist (entry '(("v" . org-linear-visit) ("o" . org-linear-browse)
+  (dolist (entry '(("m" . org-linear-my-issues)
+                   ("v" . org-linear-visit) ("o" . org-linear-browse)
                    ("s" . org-linear-sync) ("a" . org-linear-auto-sync-mode)
                    ("l" . org-linear-show-log)))
     (let ((suffix (transient-get-suffix 'org-linear-menu (car entry))))
-      (should (eq (plist-get (cdr suffix) :command) (cdr entry)))
+      (should (memq (cdr entry) (flatten-tree suffix)))
       (should (commandp (cdr entry))))))
 
 (ert-deftest org-linear-test-menu-issue-predicate ()

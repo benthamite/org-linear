@@ -173,6 +173,16 @@ For example (\"joint\"), for a team that labels work it shares."
   :type '(repeat string)
   :group 'org-linear)
 
+(defcustom org-linear-my-issues-sections
+  '(("Triage" . "TRIAGE")
+    ("In progress" . "DOING")
+    ("Waiting" . "WAITING")
+    ("To do" . "TODO"))
+  "Sections of `org-linear-my-issues', as (HEADER . TODO-KEYWORD), in order.
+A section whose keyword the file does not define is left out."
+  :type '(alist :key-type string :value-type string)
+  :group 'org-linear)
+
 (defcustom org-linear-pandoc-program "pandoc"
   "Pandoc executable used to convert between Markdown and Org."
   :type 'string
@@ -202,6 +212,7 @@ For example (\"joint\"), for a team that labels work it shares."
   "Linear's state types in workflow order.")
 
 (defvar org-linear-auto-sync-mode)
+(defvar org-agenda-custom-commands)
 
 (defvar org-linear--state nil
   "Sync state, a plist.
@@ -271,6 +282,36 @@ Save the file first, so that its edits are sent."
      buffer (lambda (data) (org-linear--on-fetch buffer data)))))
 
 ;;;###autoload
+(defun org-linear-my-issues ()
+  "Show your open issues in an agenda, grouped by status.
+Issues assigned to others are left out, as `org-linear-agenda-skip'
+decides.  The sections are `org-linear-my-issues-sections'."
+  (interactive)
+  (require 'org-agenda)
+  (org-linear--load-state)
+  (let* ((file (org-linear--ensure-file))
+         (keywords (with-current-buffer (org-linear--buffer) org-todo-keywords-1))
+         (blocks (cl-loop for (header . keyword) in org-linear-my-issues-sections
+                          when (member keyword keywords)
+                          collect `(todo ,keyword ((org-agenda-overriding-header ,header)))))
+         (org-agenda-custom-commands
+          `(("L" "Linear: my issues" ,blocks
+             ((org-agenda-files ',(list file))
+              (org-agenda-skip-function-global #'org-linear-agenda-skip)
+              (org-agenda-prefix-format '((todo . " %(org-linear--agenda-context) ")))
+              (org-agenda-sorting-strategy '((todo deadline-up priority-down alpha-up))))))))
+    (org-agenda nil "L")))
+
+(defun org-linear--agenda-context ()
+  "Return the project and due date of the issue at point, for the agenda."
+  (format "%-22s %-10s"
+          (truncate-string-to-width
+           (save-excursion
+             (if (org-up-heading-safe) (org-get-heading t t t t) ""))
+           22)
+          (or (org-linear--planning-date "DEADLINE") "")))
+
+;;;###autoload
 (defun org-linear-browse ()
   "Open the Linear issue of the heading at point."
   (interactive)
@@ -296,6 +337,7 @@ Save the file first, so that its edits are sent."
 (transient-define-prefix org-linear-menu ()
   "Visit the mirrored file and its issues, and control the sync."
   ["Issues"
+   ("m" "My issues" org-linear-my-issues)
    ("v" "Visit the file" org-linear-visit)
    ("o" "Open the issue at point in Linear" org-linear-browse
     :if org-linear--issue-at-point-p)]
