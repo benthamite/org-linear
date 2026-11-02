@@ -868,6 +868,44 @@ A string is an error message."
         (should-not (assq 'assigneeId (org-linear-test--input "i1")))
         (should (string-match-p "stands for several people" (org-linear-test--log)))))))
 
+(ert-deftest org-linear-test-unknown-labels-kept ()
+  "A tag edit keeps the labels the sync does not know."
+  (org-linear-test--with-board
+    (setf (alist-get 'labels (gethash "i1" org-linear-test--issues))
+          '((nodes . (((id . "l-far") (name . "far away"))))))
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-1")
+    (org-linear-test--editing (org-set-tags (cons "joint" (org-get-tags nil t))))
+    (save-buffer)
+    (org-linear-test--sync)
+    (should (equal (alist-get 'labelIds (org-linear-test--input "i1")) ["l-far" "l-joint"]))))
+
+(ert-deftest org-linear-test-label-of-the-issue-team ()
+  "A tag naming labels of two teams sends the label of the issue's team."
+  (org-linear-test--with-board
+    (let ((orig (symbol-function 'org-linear-test--answer)))
+      (cl-letf (((symbol-function 'org-linear-test--answer)
+                 (lambda (name vars)
+                   (let ((answer (funcall orig name vars)))
+                     (when (equal name "OrgLinearMeta")
+                       (let* ((teams (alist-get 'teams answer))
+                              (team (car (alist-get 'nodes teams))))
+                         (setf (alist-get 'nodes teams)
+                               (list team `((id . "t2") (key . "OPS") (name . "Ops")
+                                            (states . ,(alist-get 'states team))
+                                            (members . ((nodes . nil)))))))
+                       (setf (alist-get 'nodes (alist-get 'issueLabels answer))
+                             (append (alist-get 'nodes (alist-get 'issueLabels answer))
+                                     '(((id . "l-joint-ops") (name . "joint")
+                                        (team . ((id . "t2"))))))))
+                     answer))))
+        (org-linear-test--sync)
+        (org-linear-test--goto "ENG-1")
+        (org-linear-test--editing (org-set-tags (cons "joint" (org-get-tags nil t))))
+        (save-buffer)
+        (org-linear-test--sync)
+        (should (equal (alist-get 'labelIds (org-linear-test--input "i1")) ["l-joint"]))))))
+
 (ert-deftest org-linear-test-graphql-errors-reported ()
   "GraphQL errors reach the error handler with their messages."
   (let (reported)

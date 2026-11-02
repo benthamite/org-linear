@@ -1141,18 +1141,20 @@ With `org-linear-start-date-label' nil, no line counts as a Start line."
   "Return TAGS without the start label's tag if the date START is set."
   (if start (remove (org-linear--start-tag) tags) tags))
 
-(defun org-linear--with-start-label (input label-ids start changed)
+(defun org-linear--with-start-label (input label-ids start changed team)
   "Return the issue INPUT with its label IDs agreeing with the date START.
 LABEL-IDS are the issue's labels, used when INPUT sets none.  CHANGED
-means START is a new value.  Nothing is added to an INPUT that changes
-neither labels nor the date, and without a date the label is removed only
-when CHANGED, since a label set by hand may stand without one."
+means START is a new value.  TEAM is the issue's team, whose labels and
+the workspace's are searched for the start label.  Nothing is added to
+an INPUT that changes neither labels nor the date, and without a date
+the label is removed only when CHANGED, since a label set by hand may
+stand without one."
   (let ((in-input (assq 'labelIds input)))
     (if (not (and org-linear-start-date-label (or changed in-input)))
         input
       (let* ((label (seq-find (lambda (label)
                                 (equal (alist-get 'name label) org-linear-start-date-label))
-                              (plist-get org-linear--meta :labels)))
+                              (org-linear--team-labels team)))
              (id (alist-get 'id label))
              (ids (if in-input (append (cdr in-input) nil) label-ids)))
         (unless (or label (null start))
@@ -1243,9 +1245,10 @@ A field that cannot be sent is logged and left out."
                   (and org-linear-start-date-label (plist-get base :scheduled))))
          input)
     (dolist (field fields)
-      (setq input (append input (org-linear--field-input (car field) (cdr field) team))))
+      (setq input (append input (org-linear--field-input (car field) (cdr field) team
+                                                         (plist-get op :label-ids)))))
     (setq input (org-linear--with-start-label input (plist-get op :label-ids) start
-                                              (and start-field t)))
+                                              (and start-field t) team))
     (when start-field
       (setq input (append input (org-linear--snooze-input
                                  (or (cdr (assq :todo fields)) (plist-get base :todo))
@@ -1265,8 +1268,9 @@ A field that cannot be sent is logged and left out."
                      input)))
      (t (funcall callback input)))))
 
-(defun org-linear--field-input (field value team)
-  "Return the IssueUpdateInput entries that set FIELD to VALUE in TEAM."
+(defun org-linear--field-input (field value team &optional label-ids)
+  "Return the IssueUpdateInput entries that set FIELD to VALUE in TEAM.
+LABEL-IDS are the issue's labels now, for the tags."
   (pcase field
     (:title `((title . ,value)))
     (:todo (if-let* ((state (org-linear--keyword-state value team)))
@@ -1276,15 +1280,14 @@ A field that cannot be sent is logged and left out."
     (:priority `((priority . ,(org-linear--cookie-priority value))))
     (:deadline `((dueDate . ,(or value :null))))
     (:project `((projectId . ,(or value :null))))
-    (:tags (org-linear--tags-input value))
+    (:tags (org-linear--tags-input value team label-ids))
     ((or :body :scheduled) nil)))
 
-(defun org-linear--tags-input (tags)
-  "Return the assignee and label entries that TAGS stand for."
+(defun org-linear--tags-input (tags team label-ids)
+  "Return the assignee and label entries that TAGS stand for, in TEAM.
+LABEL-IDS are the issue's labels now; see `org-linear--label-ids'."
   (let* ((users (plist-get org-linear--meta :users))
          (people (seq-filter (lambda (tag) (seq-contains-p (hash-table-values users) tag)) tags))
-         (labels (seq-filter (lambda (label) (member (org-linear--label-tag label) tags))
-                             (plist-get org-linear--meta :labels)))
          (assignees (and (= (length people) 1)
                          (seq-filter (lambda (id) (equal (gethash id users) (car people)))
                                      (hash-table-keys users))))
@@ -1300,7 +1303,44 @@ A field that cannot be sent is logged and left out."
                         (car people))
        nil)
       (t `((assigneeId . ,(or assignee :null)))))
-     `((labelIds . ,(vconcat (mapcar (lambda (label) (alist-get 'id label)) labels)))))))
+     `((labelIds . ,(vconcat (org-linear--label-ids tags team label-ids)))))))
+
+(defun org-linear--label-ids (tags team label-ids)
+  "Return the label IDs of an issue of TEAM whose tags are TAGS.
+LABEL-IDS are the issue's labels now.  Of them, a label the sync does not
+know stays, and a known one stays while TAGS holds its tag.  A tag new to
+the issue adds the label of that name that TEAM can use; when several
+can, none is added and the tag is logged."
+  (let* ((known (mapcar (lambda (label) (alist-get 'id label))
+                        (plist-get org-linear--meta :labels)))
+         (kept (seq-filter (lambda (id)
+                             (or (not (member id known))
+                                 (member (org-linear--label-tag (org-linear--label-by-id id)) tags)))
+                           label-ids))
+         (kept-tags (mapcar (lambda (id)
+                              (when-let* ((label (org-linear--label-by-id id)))
+                                (org-linear--label-tag label)))
+                            kept))
+         added)
+    (dolist (tag tags)
+      (unless (member tag kept-tags)
+        (let ((matches (seq-filter (lambda (label) (equal (org-linear--label-tag label) tag))
+                                   (org-linear--team-labels team))))
+          (cond
+           ((cdr matches)
+            (org-linear--log "Not sent: the tag %s stands for several labels; rename one in Linear"
+                             tag))
+           (matches (push (alist-get 'id (car matches)) added))
+           ((member tag (plist-get org-linear--state :label-tags))
+            (org-linear--log "Not sent: the label %s belongs to another team" tag))))))
+    (append kept (nreverse added))))
+
+(defun org-linear--team-labels (team)
+  "Return the labels an issue of TEAM can have: the workspace's and TEAM's."
+  (seq-filter (lambda (label)
+                (let ((owner (alist-get 'id (alist-get 'team label))))
+                  (or (null owner) (equal owner team))))
+              (plist-get org-linear--meta :labels)))
 
 (defun org-linear--run-note (op next)
   "Post the note of OP as a comment, then call NEXT."
@@ -1368,8 +1408,8 @@ answer was lost is then found by the next sync instead of repeated."
                                 (org-linear--field-input :deadline (plist-get view :deadline) team))
                               (when (plist-get view :project)
                                 (org-linear--field-input :project (plist-get view :project) team))
-                              (org-linear--tags-input (plist-get view :tags)))
-                      nil start (and start t))))
+                              (org-linear--tags-input (plist-get view :tags) team nil))
+                      nil start (and start t) team)))
          (org-linear--graphql
           (format "mutation OrgLinearCreate($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { %s } } }" org-linear--issue-fields)

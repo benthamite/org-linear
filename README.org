@@ -106,7 +106,7 @@ The form rejects valid email addresses with a plus sign.
 
 The identifier, the issue's internal ID and its URL are kept in the =LINEAR_ID=, =LINEAR_UUID= and =LINEAR_URL= properties. The sync maintains them; do not edit them.
 
-Tags that name neither a team member nor a label are yours: the sync leaves them alone and never sends them. A label's tag is its name with every character Org does not allow in tags replaced by =_=, so the label =requested-by:peter= becomes the tag =requested_by_peter=.
+Tags that name neither a team member nor a label are yours: the sync leaves them alone and never sends them. A label's tag is its name with every character Org does not allow in tags replaced by =_=, so the label =requested-by:peter= becomes the tag =requested_by_peter=. A tag you add sends the label of that name that the issue's team can use; if several can, it is logged and not sent.
 
 Linear issues have no start date, so by default =SCHEDULED= is not synced: use it freely to defer an issue in your own agenda.
 
@@ -314,7 +314,7 @@ The key reaches =curl= on its standard input, never on its command line, where o
 - Comment replies are not shown.
 - An issue that re-enters the file, for instance after being reopened, gets its comments again from Linear, but your old notes on it are not restored.
 - Markdown headings in a description become bold lines, since an Org heading inside an issue's body would split the issue.
-- The sync reads up to 250 labels and 250 projects, and up to 100 comments per issue.
+- The sync reads up to 250 labels and 250 projects, and up to 100 comments per issue. A label beyond those 250 shows no tag, but editing the tags never removes it from the issue.
 
 * Indices
 :PROPERTIES:
