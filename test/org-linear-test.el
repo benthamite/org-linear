@@ -906,6 +906,23 @@ A string is an error message."
         (org-linear-test--sync)
         (should (equal (alist-get 'labelIds (org-linear-test--input "i1")) ["l-joint"]))))))
 
+(ert-deftest org-linear-test-state-write-cut-short ()
+  "A state write cut short leaves the previous state whole."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let ((before (with-temp-buffer (insert-file-contents org-linear-state-file) (buffer-string)))
+          (write (symbol-function 'write-region)))
+      (cl-letf (((symbol-function 'write-region)
+                 (lambda (start end file &rest args)
+                   (apply write (substring (if start (buffer-substring start end) (buffer-string)) 0 10)
+                          nil file args)
+                   (error "No space left on device"))))
+        (should-error (org-linear--save-state)))
+      (should (equal (with-temp-buffer (insert-file-contents org-linear-state-file) (buffer-string))
+                     before))
+      (should (equal (directory-files (file-name-directory org-linear-state-file) nil "\\.tmp\\'")
+                     nil)))))
+
 (ert-deftest org-linear-test-graphql-errors-reported ()
   "GraphQL errors reach the error handler with their messages."
   (let (reported)

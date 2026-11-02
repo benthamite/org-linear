@@ -2068,19 +2068,28 @@ Open issues do, and closed ones for `org-linear-closed-retention-days'."
                   :label-tags (plist-get saved :label-tags))))))
 
 (defun org-linear--save-state ()
-  "Write the sync state to `org-linear-state-file'."
-  (let (entries)
+  "Write the sync state to `org-linear-state-file'.
+The state goes to a temporary file that then replaces the old one, so a
+write cut short leaves the previous state whole."
+  (let ((dir (file-name-directory org-linear-state-file))
+        entries temp)
     (maphash (lambda (id base) (push (cons id base) entries)) (org-linear--state-tasks))
-    (make-directory (file-name-directory org-linear-state-file) t)
-    (with-temp-file org-linear-state-file
-      (let ((print-length nil) (print-level nil))
-        (prin1 (list :version 1
-                     :rejected-adds (plist-get org-linear--state :rejected-adds)
-                     :me-tag (plist-get org-linear--state :me-tag)
-                     :user-tags (plist-get org-linear--state :user-tags)
-                     :label-tags (plist-get org-linear--state :label-tags)
-                     :tasks entries)
-               (current-buffer))))))
+    (make-directory dir t)
+    (setq temp (make-temp-file (expand-file-name "state-" dir) nil ".tmp"))
+    (unwind-protect
+        (progn
+          (with-temp-file temp
+            (let ((print-length nil) (print-level nil))
+              (prin1 (list :version 1
+                           :rejected-adds (plist-get org-linear--state :rejected-adds)
+                           :me-tag (plist-get org-linear--state :me-tag)
+                           :user-tags (plist-get org-linear--state :user-tags)
+                           :label-tags (plist-get org-linear--state :label-tags)
+                           :tasks entries)
+                     (current-buffer))))
+          (rename-file temp org-linear-state-file t))
+      (when (file-exists-p temp)
+        (delete-file temp)))))
 
 ;;;; Talking to Linear
 
