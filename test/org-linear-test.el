@@ -1090,6 +1090,17 @@ A string is an error message."
                                                              (line-end-position))))
         (should (string-match-p "To do\n\\(?:.*\n\\)*?.*Triage A" (buffer-string)))))))
 
+(ert-deftest org-linear-test-list-dies-with-file-buffer ()
+  "Killing the file's buffer kills the list, which would lead nowhere."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let ((org-linear-my-issues-sync nil))
+      (org-linear-test--with-list
+        (let ((list org-linear--list-buffer))
+          (should (buffer-live-p list))
+          (kill-buffer (org-linear--buffer))
+          (should-not (buffer-live-p list)))))))
+
 (ert-deftest org-linear-test-list-reject-with-reason ()
   "Rejecting from the list asks for a reason, and the reason is posted."
   (org-linear-test--with-board

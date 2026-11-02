@@ -369,9 +369,18 @@ its new section at once."
   :keymap org-linear-my-issues-mode-map)
 
 (defun org-linear--list-setup ()
-  "Set up the agenda buffer being built as the list of your issues."
+  "Set up the agenda buffer being built as the list of your issues.
+Killing the buffer of `org-linear-file' kills the list too, since its
+lines would no longer lead to any heading."
   (setq org-linear--list-buffer (current-buffer))
-  (org-linear-my-issues-mode 1))
+  (org-linear-my-issues-mode 1)
+  (with-current-buffer (org-linear--buffer)
+    (add-hook 'kill-buffer-hook #'org-linear--kill-list nil t)))
+
+(defun org-linear--kill-list ()
+  "Kill the list of your issues, if it is open."
+  (when (buffer-live-p org-linear--list-buffer)
+    (kill-buffer org-linear--list-buffer)))
 
 (defun org-linear-my-issues-todo (&optional arg)
   "Change the status of the issue at point, then rebuild the list.
