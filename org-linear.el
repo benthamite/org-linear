@@ -149,7 +149,8 @@ as the priority of the nearest listed cookie above it."
 
 (defcustom org-linear-user-tags nil
   "Linear user names and the tags that stand for them.
-A user not listed here gets the first word of their name in lower case."
+A user not listed here gets the first word of their name in lower case,
+or their full name if another member's would give the same tag."
   :type '(alist :key-type string :value-type string)
   :group 'org-linear)
 
@@ -639,13 +640,13 @@ set are fetched too, so that their edits still sync."
   "Return the sync's metadata, a plist, from the OrgLinearMeta DATA."
   (let* ((teams (alist-get 'nodes (alist-get 'teams data)))
          (team-ids (mapcar (lambda (team) (alist-get 'id team)) teams))
-         (users (make-hash-table :test #'equal)))
+         (names (make-hash-table :test #'equal)))
     (dolist (team teams)
       (dolist (user (alist-get 'nodes (alist-get 'members team)))
-        (puthash (alist-get 'id user) (org-linear--user-tag (alist-get 'name user)) users)))
+        (puthash (alist-get 'id user) (alist-get 'name user) names)))
     (list :viewer (alist-get 'id (alist-get 'viewer data))
           :teams teams
-          :users users
+          :users (org-linear--user-tags names)
           :labels (seq-filter
                    (lambda (label)
                      (let ((team (alist-get 'id (alist-get 'team label))))
@@ -716,6 +717,25 @@ set are fetched too, so that their edits still sync."
                         (plist-get org-linear--meta :users)))))
 
 ;;;; Tags, states and priorities
+
+(defun org-linear--user-tags (names)
+  "Return a hash table from user ID to tag, for NAMES, from user ID to name.
+Users who would share a tag of `org-linear--user-tag' get their full names
+instead, unless `org-linear-user-tags' gives them that tag, so that a tag
+stands for one person."
+  (let ((counts (make-hash-table :test #'equal))
+        (tags (make-hash-table :test #'equal)))
+    (maphash (lambda (_ name) (cl-incf (gethash (org-linear--user-tag name) counts 0)))
+             names)
+    (maphash (lambda (id name)
+               (let ((tag (org-linear--user-tag name)))
+                 (puthash id (if (and (> (gethash tag counts) 1)
+                                      (not (assoc name org-linear-user-tags)))
+                                 (org-linear--sanitize-tag (downcase (or name "someone")))
+                               tag)
+                          tags)))
+             names)
+    tags))
 
 (defun org-linear--user-tag (name)
   "Return the tag for the Linear user NAME."
@@ -1265,14 +1285,19 @@ A field that cannot be sent is logged and left out."
          (people (seq-filter (lambda (tag) (seq-contains-p (hash-table-values users) tag)) tags))
          (labels (seq-filter (lambda (label) (member (org-linear--label-tag label) tags))
                              (plist-get org-linear--meta :labels)))
-         (assignee (and (= (length people) 1)
-                        (car (seq-filter (lambda (id) (equal (gethash id users) (car people)))
-                                         (hash-table-keys users))))))
+         (assignees (and (= (length people) 1)
+                         (seq-filter (lambda (id) (equal (gethash id users) (car people)))
+                                     (hash-table-keys users))))
+         (assignee (car assignees)))
     (append
      (cond
       ((> (length people) 1)
        (org-linear--log "Not sent: an issue has one assignee, but the tags name %s"
                         (string-join people ", "))
+       nil)
+      ((cdr assignees)
+       (org-linear--log "Not sent: the tag %s stands for several people; give them their own tags in `org-linear-user-tags'"
+                        (car people))
        nil)
       (t `((assigneeId . ,(or assignee :null)))))
      `((labelIds . ,(vconcat (mapcar (lambda (label) (alist-get 'id label)) labels)))))))

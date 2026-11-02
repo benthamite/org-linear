@@ -823,6 +823,51 @@ A string is an error message."
     (org-linear-test--goto-title "Brand new idea")
     (should (org-entry-get nil "LINEAR_ID"))))
 
+(defmacro org-linear-test--with-second-peter (&rest body)
+  "Run BODY with a second team member named Peter, Peter Other."
+  (declare (indent 0))
+  `(let ((orig (symbol-function 'org-linear-test--answer))
+         (org-linear-test--users (cons '("u-peter2" . "Peter Other") org-linear-test--users)))
+     (cl-letf (((symbol-function 'org-linear-test--answer)
+                (lambda (name vars)
+                  (let ((answer (funcall orig name vars)))
+                    (when (equal name "OrgLinearMeta")
+                      (let ((members (alist-get 'members
+                                                (car (alist-get 'nodes (alist-get 'teams answer))))))
+                        (setf (alist-get 'nodes members)
+                              (append (alist-get 'nodes members)
+                                      (list (org-linear-test--user "u-peter2"))))))
+                    answer))))
+       ,@body)))
+
+(ert-deftest org-linear-test-namesakes-get-full-names ()
+  "Members who share a first name get full-name tags; a label edit keeps the assignee."
+  (org-linear-test--with-board
+    (org-linear-test--with-second-peter
+      (puthash "i9" (org-linear-test--issue "i9" "ENG-9" "Peter's task" :assignee "u-peter"
+                                            :description "x.")
+               org-linear-test--issues)
+      (org-linear-test--sync)
+      (org-linear-test--goto "ENG-9")
+      (should (equal (org-get-tags nil t) '("peter_hartree")))
+      (org-linear-test--editing (org-set-tags (cons "joint" (org-get-tags nil t))))
+      (save-buffer)
+      (org-linear-test--sync)
+      (should (equal (alist-get 'assigneeId (org-linear-test--input "i9")) "u-peter")))))
+
+(ert-deftest org-linear-test-shared-tag-not-sent-as-assignee ()
+  "A tag the user gives to two people is not sent as an assignee."
+  (org-linear-test--with-board
+    (org-linear-test--with-second-peter
+      (let ((org-linear-user-tags '(("Peter Hartree" . "peter") ("Peter Other" . "peter"))))
+        (org-linear-test--sync)
+        (org-linear-test--goto "ENG-1")
+        (org-linear-test--editing (org-set-tags '("peter")))
+        (save-buffer)
+        (org-linear-test--sync)
+        (should-not (assq 'assigneeId (org-linear-test--input "i1")))
+        (should (string-match-p "stands for several people" (org-linear-test--log)))))))
+
 (ert-deftest org-linear-test-graphql-errors-reported ()
   "GraphQL errors reach the error handler with their messages."
   (let (reported)

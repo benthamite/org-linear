@@ -293,7 +293,7 @@ The key reaches =curl= on its standard input, never on its command line, where o
 #+end_src
 
 #+vindex: org-linear-user-tags
-~org-linear-user-tags~ maps team members' names to tags. A member not listed gets the first word of their name in lower case. Members of other teams have no tag; an issue assigned to one of them keeps that assignee, since the file cannot represent it.
+~org-linear-user-tags~ maps team members' names to tags. A member not listed gets the first word of their name in lower case, or their full name, as in "peter_hartree", when another member would get the same tag, so that a tag always stands for one person. Members of other teams have no tag; an issue assigned to one of them keeps that assignee, since the file cannot represent it.
 
 ** Programs
 :PROPERTIES:
