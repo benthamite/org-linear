@@ -24,6 +24,10 @@
 (defvar org-linear-test--refuse-next nil
   "Non-nil makes the next edit check report a newer edit.")
 
+(defvar org-linear-test--lose-next nil
+  "Name of an operation whose next answer is lost on the way back.
+The fake Linear still carries the operation out.")
+
 (defconst org-linear-test--states
   '(((id . "s-triage") (name . "Triage") (type . "triage") (position . 0))
     ((id . "s-backlog") (name . "Backlog") (type . "backlog") (position . 0))
@@ -83,7 +87,8 @@
   (setq org-linear-test--issues (make-hash-table :test #'equal)
         org-linear-test--calls nil
         org-linear-test--clock 0
-        org-linear-test--refuse-next nil)
+        org-linear-test--refuse-next nil
+        org-linear-test--lose-next nil)
   (let ((today (format-time-string "%FT10:00:00Z" nil t)))
     (dolist (issue
              (list
@@ -126,10 +131,17 @@ Like Linear, refuse a nil variable, which `json-serialize' sends as {}."
                     (match-string 1 query)))
          (answer (org-linear-test--answer name variables)))
     (push (cons name variables) org-linear-test--calls)
+    (when (equal name org-linear-test--lose-next)
+      (setq org-linear-test--lose-next nil
+            answer 'lost))
     (run-at-time 0 nil (lambda ()
-                         (if (stringp answer)
-                             (if errback (funcall errback answer) (org-linear--fail "%s" answer))
-                           (funcall callback answer))))))
+                         (cond
+                          ;; As `org-linear--handle-response' treats a timeout.
+                          ((eq answer 'lost)
+                           (org-linear--fail "curl failed (28): Operation timed out"))
+                          ((stringp answer)
+                           (if errback (funcall errback answer) (org-linear--fail "%s" answer)))
+                          (t (funcall callback answer)))))))
 
 (defun org-linear-test--check-serializable (value)
   "Signal an error if the alist VALUE holds a nil, at any depth."
@@ -202,7 +214,7 @@ A string is an error message."
     ("OrgLinearCreate"
      (let* ((input (alist-get 'input variables))
             (n (1+ (hash-table-count org-linear-test--issues)))
-            (id (format "i-new-%d" n))
+            (id (or (alist-get 'id input) (format "i-new-%d" n)))
             (issue (org-linear-test--issue id (format "ENG-%d" (+ 100 n)) (alist-get 'title input)
                                            :project nil)))
        (puthash id issue org-linear-test--issues)
@@ -762,6 +774,54 @@ A string is an error message."
     (should (equal forgot '("forget")))
     (should (eq retried t))
     (should-not org-linear--api-key-cache)))
+
+(ert-deftest org-linear-test-transient-failures-end-the-sync ()
+  "A failure in which Linear judged nothing ends the sync; it is no refusal."
+  (dolist (out '("{}\n502" "{\"errors\":[{\"message\":\"slow down\"}]}\n429"
+                 "{\"errors\":[{\"message\":\"slow down\",\"extensions\":{\"code\":\"RATELIMITED\"}}]}\n400"
+                 "no status"))
+    (let (refused failed)
+      (cl-letf (((symbol-function 'org-linear--fail)
+                 (lambda (&rest args) (setq failed (apply #'format args)))))
+        (org-linear--handle-response
+         "q" nil #'ignore (lambda (message) (setq refused message)) nil 0 out ""))
+      (should failed)
+      (should-not refused))))
+
+(ert-deftest org-linear-test-lost-update-sent-again ()
+  "An update whose answer is lost is sent again by the next sync."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-1")
+    (org-linear-test--editing (org-edit-headline "Task one, edited"))
+    (save-buffer)
+    (setq org-linear-test--lose-next "OrgLinearEdited")
+    (org-linear-test--sync)
+    (should (equal (alist-get 'title (gethash "i1" org-linear-test--issues)) "Task one"))
+    (org-linear-test--sync)
+    (should (equal (alist-get 'title (gethash "i1" org-linear-test--issues)) "Task one, edited"))))
+
+(ert-deftest org-linear-test-lost-create-not-repeated ()
+  "A new issue whose creation answer is lost is linked, not created twice."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-1")
+    (org-linear-test--editing
+      (org-insert-heading-respect-content)
+      (insert "TODO Brand new idea"))
+    (save-buffer)
+    (setq org-linear-test--lose-next "OrgLinearCreate")
+    (org-linear-test--sync)
+    (org-linear-test--sync)
+    (let ((copies 0))
+      (maphash (lambda (_ issue)
+                 (when (equal (alist-get 'title issue) "Brand new idea") (cl-incf copies)))
+               org-linear-test--issues)
+      (should (= copies 1)))
+    (should (= (how-many "Brand new idea" (point-min) (point-max)) 1))
+    (should-not (string-match-p "LINEAR_PENDING_UUID" (org-linear-test--text)))
+    (org-linear-test--goto-title "Brand new idea")
+    (should (org-entry-get nil "LINEAR_ID"))))
 
 (ert-deftest org-linear-test-graphql-errors-reported ()
   "GraphQL errors reach the error handler with their messages."

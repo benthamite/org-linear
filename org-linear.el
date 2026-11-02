@@ -45,6 +45,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'org)
+(require 'org-id)
 (require 'seq)
 (require 'subr-x)
 (require 'transient)
@@ -986,6 +987,9 @@ holds unsent edits, and its heading goes once it has none."
         (when (and (null ops) (not (org-linear--in-scope-p task)))
           (org-linear--remove-if-unchanged id marker nil))
         ops))
+     ((gethash id (plist-get index :pending))
+      ;; Created by a sync whose answer was lost; its creation links it.
+      nil)
      (t
       (remhash id (org-linear--state-tasks))
       (when (org-linear--in-scope-p task)
@@ -1066,6 +1070,7 @@ BASE its state."
     (dolist (marker (plist-get index :new))
       (let* ((view (org-linear--local-view marker))
              (op (list :type 'add :marker marker :view view
+                       :pending (org-entry-get marker "LINEAR_PENDING_UUID")
                        :team (org-linear--team-for-project (plist-get view :project)))))
         (if (member (org-linear--op-signature op)
                     (plist-get org-linear--state :rejected-adds))
@@ -1294,7 +1299,34 @@ A field that cannot be sent is logged and left out."
         (org-linear--rejected-handler op next))))))
 
 (defun org-linear--run-add (op next)
-  "Create the Linear issue of OP, then call NEXT."
+  "Create the Linear issue of OP, then call NEXT.
+The issue's ID is chosen here and kept on its heading, as the property
+LINEAR_PENDING_UUID, until Linear confirms the issue.  A create whose
+answer was lost is then found by the next sync instead of repeated."
+  (if-let* ((pending (plist-get op :pending)))
+      (org-linear--fetch-issues
+       `((id . ((in . ,(vector pending))))) nil nil
+       (lambda (found)
+         (if found
+             (let ((task (org-linear--task (car found))))
+               (org-linear--finish-create op (alist-get 'description task) task next))
+           (org-linear--create op pending next))))
+    (let ((id (org-id-uuid)))
+      (org-linear--mark-pending op id)
+      (org-linear--create op id next))))
+
+(defun org-linear--mark-pending (op id)
+  "Record ID on the heading of OP as the ID of the issue being created."
+  (let ((marker (plist-get op :marker)))
+    (org-linear--edit-and-maybe-save
+     (marker-buffer marker)
+     (lambda ()
+       (when-let* ((heading (org-linear--created-heading
+                             marker (plist-get (plist-get op :view) :title))))
+         (org-entry-put heading "LINEAR_PENDING_UUID" id))))))
+
+(defun org-linear--create (op id next)
+  "Create the Linear issue of OP with ID, then call NEXT."
   (let ((view (plist-get op :view))
         (team (plist-get op :team)))
     (org-linear--org-to-md
@@ -1303,7 +1335,7 @@ A field that cannot be sent is logged and left out."
        (let* ((start (plist-get view :scheduled))
               (md (org-linear--join-description start body-md))
               (input (org-linear--with-start-label
-                      (append `((teamId . ,team) (title . ,(plist-get view :title))
+                      (append `((id . ,id) (teamId . ,team) (title . ,(plist-get view :title))
                                 (description . ,md))
                               (org-linear--field-input :todo (plist-get view :todo) team)
                               (org-linear--field-input :priority (plist-get view :priority) team)
@@ -1318,12 +1350,20 @@ A field that cannot be sent is logged and left out."
   issueCreate(input: $input) { success issue { %s } } }" org-linear--issue-fields)
           `((input . ,input))
           (lambda (data)
-            (let ((task (org-linear--task (alist-get 'issue (alist-get 'issueCreate data)))))
-              (org-linear--link-created (plist-get op :marker) view md task)
-              (if-let* ((snooze (and start (org-linear--snooze-input (plist-get view :todo) start team))))
-                  (org-linear--snooze-created task snooze next)
-                (funcall next))))
+            (org-linear--finish-create
+             op md (org-linear--task (alist-get 'issue (alist-get 'issueCreate data))) next))
           (org-linear--rejected-handler op next)))))))
+
+(defun org-linear--finish-create (op md task next)
+  "Link TASK, created for OP with description MD, to its heading; then NEXT.
+A new issue with a start date is snoozed too."
+  (let* ((view (plist-get op :view))
+         (start (plist-get view :scheduled)))
+    (org-linear--link-created (plist-get op :marker) view md task)
+    (if-let* ((snooze (and start (org-linear--snooze-input
+                                  (plist-get view :todo) start (plist-get op :team)))))
+        (org-linear--snooze-created task snooze next)
+      (funcall next))))
 
 (defun org-linear--snooze-created (task snooze next)
   "Send SNOOZE for the newly created TASK, then call NEXT.
@@ -1354,7 +1394,9 @@ too.  The issue exists by now, so a refusal is only logged."
      (marker-buffer marker)
      (lambda ()
        (if-let* ((heading (org-linear--created-heading marker (plist-get view :title))))
-           (org-linear--set-static-properties heading task)
+           (progn
+             (org-linear--set-static-properties heading task)
+             (org-entry-delete heading "LINEAR_PENDING_UUID"))
          (org-linear--log "Created %s, but its heading \"%s\" moved or changed; the next sync adds it again from Linear, so delete your copy"
                           (alist-get 'identifier task) (plist-get view :title)))))
     (puthash (alist-get 'id task) base (org-linear--state-tasks))
@@ -1870,11 +1912,13 @@ written when the heading stays."
   "Index the current buffer's headings.
 Return a plist: :tasks maps issue IDs to issue heading markers, :projects
 maps project IDs (or \"none\") to project heading markers, :duplicates
-holds issue IDs with more than one heading, and :new lists the markers of
-issue headings not yet in Linear."
+holds issue IDs with more than one heading, :new lists the markers of
+issue headings not yet in Linear, and :pending holds the IDs their
+creation was sent with."
   (let ((tasks (make-hash-table :test #'equal))
         (projects (make-hash-table :test #'equal))
         (duplicates (make-hash-table :test #'equal))
+        (pending (make-hash-table :test #'equal))
         new)
     (goto-char (point-min))
     (while (re-search-forward org-outline-regexp-bol nil t)
@@ -1891,9 +1935,12 @@ issue headings not yet in Linear."
              ((and (org-get-todo-state)
                    (save-excursion (org-up-heading-safe)
                                    (org-entry-get nil "LINEAR_PROJECT")))
+              (when-let* ((id (org-entry-get nil "LINEAR_PENDING_UUID")))
+                (puthash id t pending))
               (push (org-linear--marker) new))))))
         (end-of-line)))
-    (list :tasks tasks :projects projects :duplicates duplicates :new (nreverse new))))
+    (list :tasks tasks :projects projects :duplicates duplicates :new (nreverse new)
+          :pending pending)))
 
 (defun org-linear--marker (&optional pos)
   "Return a marker at POS, or the current heading, that text inserted there pushes.
@@ -2007,7 +2054,7 @@ CALLBACK, ERRBACK and RETRIED are as in `org-linear--graphql'."
          (errors (alist-get 'errors json)))
     (cond
      ((/= code 0)
-      (org-linear--error errback "curl failed (%d): %s" code (string-trim err)))
+      (org-linear--fail "curl failed (%d): %s" code (string-trim err)))
      ((and (or (eql status 401) (org-linear--auth-error-p errors))
            (not retried) org-linear-api-key-forget-command)
       (org-linear--log "Linear rejected the key; reading it again")
@@ -2015,12 +2062,33 @@ CALLBACK, ERRBACK and RETRIED are as in `org-linear--graphql'."
       (org-linear--run-process
        org-linear-api-key-forget-command nil
        (lambda (&rest _) (org-linear--graphql query variables callback errback t))))
+     ((org-linear--transient-failure-p status errors)
+      (org-linear--fail "Linear could not answer (HTTP %s): %s" status
+                        (if errors (org-linear--error-messages errors) "no error given")))
      (errors
-      (org-linear--error errback "%s" (mapconcat (lambda (e) (or (alist-get 'message e) "error"))
-                                                  errors "; ")))
+      (org-linear--error errback "%s" (org-linear--error-messages errors)))
      ((not (eql status 200))
       (org-linear--error errback "Linear answered HTTP %s" status))
      (t (funcall callback (alist-get 'data json))))))
+
+(defun org-linear--transient-failure-p (status errors)
+  "Return non-nil if STATUS and ERRORS mean Linear did not judge the request.
+STATUS is the HTTP status, or nil if none came, and ERRORS the GraphQL
+errors.  A server error, a rate limit or a refused key is such a failure,
+and a write that fails so is tried again by the next sync rather than
+remembered as refused."
+  (or (null status)
+      (eql status 401)
+      (eql status 429)
+      (>= status 500)
+      (org-linear--auth-error-p errors)
+      (seq-some (lambda (e)
+                  (equal (alist-get 'code (alist-get 'extensions e)) "RATELIMITED"))
+                errors)))
+
+(defun org-linear--error-messages (errors)
+  "Return the messages of the GraphQL ERRORS, joined."
+  (mapconcat (lambda (e) (or (alist-get 'message e) "error")) errors "; "))
 
 (defun org-linear--auth-error-p (errors)
   "Return non-nil if ERRORS report an authentication failure."

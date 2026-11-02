@@ -134,7 +134,7 @@ The file's own =#+TODO= line, written from ~org-linear-file-header~ when the fil
 Edit issues with ordinary Org commands, then save the file; with ~org-linear-auto-sync-mode~ the save sends your changes ([[#h:syncing][Syncing]]).
 
 - To comment on an issue, add a note with =C-c C-z= (~org-add-note~). Notes attached to state changes, such as the one the default header asks for when you cancel an issue, are posted too, prefixed with the new keyword.
-- To create an issue, add a level-2 heading with a TODO keyword under a project heading, with its description as the body. At the next sync it is created in Linear, in the project's team, and gets its =LINEAR_ID=.
+- To create an issue, add a level-2 heading with a TODO keyword under a project heading, with its description as the body. At the next sync it is created in Linear, in the project's team, and gets its =LINEAR_ID=. Until Linear confirms the issue, the heading holds the ID it was sent with as =LINEAR_PENDING_UUID=, so that an issue whose creation was not confirmed is found by the next sync rather than created twice.
 - To move an issue to another project, refile it under that project's heading.
 - To assign an issue, tag it with the person's tag; an issue has one assignee, so a heading with two people's tags sends no assignee and the sync log says why.
 
@@ -167,7 +167,7 @@ The merge is three-way. For each field the sync compares the file and Linear wit
 - A field changed only in the file is sent to Linear.
 - When both sides changed a field, Linear's value wins, and yours is recorded in the sync log.
 
-Before each write the sync checks when the issue was last edited. If someone changed it in Linear after the sync read it, the write is refused and the issue is merged again at the next sync, so a change made in Linear is never overwritten. A write Linear rejects, for instance for an invalid value, is logged and not retried until you change what was sent; the sync's other writes still go through.
+Before each write the sync checks when the issue was last edited. If someone changed it in Linear after the sync read it, the write is refused and the issue is merged again at the next sync, so a change made in Linear is never overwritten. A write Linear rejects, for instance for an invalid value, is logged and not retried until you change what was sent; the sync's other writes still go through. A write that fails before Linear judges it, through a timeout, a server error or a rate limit, ends the sync instead, and the next sync tries it again.
 
 A sync never changes the file while it has unsaved edits, and never applies changes if the file changed on disk since you visited it. The changes a sync makes clear the buffer's undo history, since undoing them would send a reversal of your colleagues' changes to Linear.
 
