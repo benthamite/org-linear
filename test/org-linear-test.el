@@ -1081,24 +1081,30 @@ A string is an error message."
       (should (member "deferred" (org-get-tags nil t))))))
 
 (ert-deftest org-linear-test-start-snoozes-triage ()
-  "SCHEDULED on a triage issue also snoozes it; removing it ends the snooze."
+  "SCHEDULED on a triage issue snoozes it until local midnight.
+Removing it ends the snooze."
   (org-linear-test--with-board
     (org-linear-test--seed-started)
-    (let ((org-linear-start-date-label "deferred"))
-      (org-linear-test--sync)
-      (with-current-buffer (org-linear--buffer)
-        (org-linear-test--goto-title "Triage task")
-        (org-add-planning-info 'scheduled (date-to-time "2099-04-04T12:00:00"))
-        (save-buffer))
-      (org-linear-test--sync)
-      (should (equal (alist-get 'snoozedUntilAt (gethash "i8" org-linear-test--issues))
-                     "2099-04-04T00:00:00.000Z"))
-      (with-current-buffer (org-linear--buffer)
-        (org-linear-test--goto-title "Triage task")
-        (org-add-planning-info nil nil 'scheduled)
-        (save-buffer))
-      (org-linear-test--sync)
-      (should-not (alist-get 'snoozedUntilAt (gethash "i8" org-linear-test--issues))))))
+    (let ((org-linear-start-date-label "deferred")
+          (tz (getenv "TZ")))
+      (set-time-zone-rule "<-03>3")
+      (unwind-protect
+          (progn
+            (org-linear-test--sync)
+            (with-current-buffer (org-linear--buffer)
+              (org-linear-test--goto-title "Triage task")
+              (org-add-planning-info 'scheduled (date-to-time "2099-04-04T12:00:00"))
+              (save-buffer))
+            (org-linear-test--sync)
+            (should (equal (alist-get 'snoozedUntilAt (gethash "i8" org-linear-test--issues))
+                           "2099-04-04T03:00:00.000Z"))
+            (with-current-buffer (org-linear--buffer)
+              (org-linear-test--goto-title "Triage task")
+              (org-add-planning-info nil nil 'scheduled)
+              (save-buffer))
+            (org-linear-test--sync)
+            (should-not (alist-get 'snoozedUntilAt (gethash "i8" org-linear-test--issues))))
+        (set-time-zone-rule tz)))))
 
 (ert-deftest org-linear-test-start-on-new-heading ()
   "A new heading with SCHEDULED is created with the line and the label."

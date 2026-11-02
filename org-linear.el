@@ -1170,7 +1170,12 @@ This applies only to a state of TEAM of the triage type, where Linear
 keeps a snoozed issue out of the inbox.  With START nil, it ends a snooze."
   (when (and org-linear-start-date-label
              (equal (alist-get 'type (org-linear--keyword-state keyword team)) "triage"))
-    `((snoozedUntilAt . ,(if start (concat start "T00:00:00.000Z") :null)))))
+    `((snoozedUntilAt . ,(if start (org-linear--local-midnight start) :null)))))
+
+(defun org-linear--local-midnight (date)
+  "Return the start of DATE, YYYY-MM-DD, in local time, as a UTC timestamp."
+  (pcase-let ((`(,year ,month ,day) (mapcar #'string-to-number (split-string date "-"))))
+    (format-time-string "%FT%T.000Z" (encode-time (list 0 0 0 day month year nil -1 nil)) t)))
 
 (defun org-linear--migrate-start-line (marker base)
   "Return BASE with any Start line taken out of its body and the heading's.
