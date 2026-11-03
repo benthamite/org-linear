@@ -156,6 +156,10 @@ The file holds every open issue of the teams and the issues closed in the last ~
 #+vindex: org-linear-archive-file
 An issue that leaves moves to the archive file named by ~org-linear-archive-file~, under a heading named after its project, with the properties Org's archiving adds (=ARCHIVE_TIME=, =ARCHIVE_OLPATH= and the like). Your subheadings and notes go with it. By default the archive is =linear-archive.org= next to =linear.org=: a =%s= in the option stands for the name of ~org-linear-file~ without its directory and extension, and a relative name is relative to that file's directory. The sync creates the archive with the file's =#+TODO= and =#+PRIORITIES= lines and saves it before the file. While the archive's buffer has unsaved edits, or the archive changed on disk, closed issues stay in the file and the sync log says why; they move at the first sync after you save or revert it. Neither the kill ring nor the clipboard is touched.
 
+#+findex: org-linear-archive-closed
+#+findex: org-linear-archive
+You need not wait for the retention period to end. =M-x org-linear-archive-closed= archives every closed issue in the file at once, and =M-x org-linear-archive= the one at point; in the file, under ~org-linear-auto-sync-mode~, it replaces ~org-archive-subtree~ (=C-c C-x C-s=), which it calls for a heading that is not an issue. Either way the sync remembers the issue and leaves it out of the file while it stays closed; if someone reopens it in Linear, it comes back. Neither archives an open issue, which the next sync would bring back, nor one whose heading holds edits or notes not yet in Linear: sync first. They save the archive and the sync state, and the file too unless it had unsaved edits of yours.
+
 Set ~org-linear-archive-file~ to =nil= to delete closed issues instead. A heading with subheadings of your own then stays in the file for good, and the sync log says so.
 
 * Syncing
@@ -221,6 +225,8 @@ Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with t
 | =b= | ~org-linear-browse~         | Browse the issue at point in Linear          |
 | =t= | ~org-linear-my-issues-todo~ | Change the status of the issue at point      |
 | =c= | ~org-linear-comment~        | Comment on the issue at point                |
+| =x= | ~org-linear-archive~        | Archive the closed issue at point            |
+| =X= | ~org-linear-archive-closed~ | Archive every closed issue now               |
 | =s= | ~org-linear-sync~           | Sync now                                     |
 | =a= | ~org-linear-auto-sync-mode~ | Turn syncing on save, visit and timer on/off |
 | =l= | ~org-linear-show-log~       | Show the sync log                            |

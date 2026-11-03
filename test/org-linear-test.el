@@ -465,6 +465,57 @@ A string is an error message."
     (should (string-match-p "Joint task" (org-linear-test--archive-text)))
     (should (string-match-p "My unsaved note" (org-linear-test--archive-text)))))
 
+;;;; Archiving on demand
+
+(ert-deftest org-linear-test-archive-closed-sticks ()
+  "Archiving recent closed issues keeps them out until one is reopened."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (should (string-match-p "Closed today" (org-linear-test--text)))
+    (org-linear-archive-closed)
+    (should-not (string-match-p "Closed today" (org-linear-test--text)))
+    (should (string-match-p "^\\* Project B\n+\\*\\* DONE Closed today"
+                            (org-linear-test--archive-text)))
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (should-not (buffer-modified-p)))
+    ;; The list of archived issues survives a restart.
+    (setq org-linear--state nil)
+    (org-linear-test--sync)
+    (should-not (string-match-p "Closed today" (org-linear-test--text)))
+    (org-linear-test--edit "i3" 'state (org-linear-test--state "s-todo"))
+    (org-linear-test--edit "i3" 'completedAt nil)
+    (org-linear-test--sync)
+    (should (string-match-p "TODO Closed today" (org-linear-test--text)))
+    (should-not (member "i3" (plist-get org-linear--state :archived)))))
+
+(ert-deftest org-linear-test-archive-closed-keeps-unsent ()
+  "A closed issue whose heading holds an unsent edit is not archived."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-3")
+    (org-linear-test--editing
+      (org-edit-headline "Closed today, renamed")
+      (save-buffer))
+    (org-linear-archive-closed)
+    (should (string-match-p "Closed today, renamed" (org-linear-test--text)))
+    (should-not (org-linear-test--archive-text))))
+
+(ert-deftest org-linear-test-archive-at-point ()
+  "The archive key archives a closed issue and refuses an open one."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-1")
+    (org-linear-file-mode 1)
+    (should (eq (key-binding (kbd "C-c C-x C-s")) #'org-linear-archive))
+    (should-error (org-linear-archive) :type 'user-error)
+    (should (string-match-p "Task one" (org-linear-test--text)))
+    (org-linear-test--goto "ENG-3")
+    (org-linear-archive)
+    (should-not (string-match-p "Closed today" (org-linear-test--text)))
+    (should (string-match-p "Closed today" (org-linear-test--archive-text)))
+    (org-linear-test--sync)
+    (should-not (string-match-p "Closed today" (org-linear-test--text)))))
+
 (ert-deftest org-linear-test-closed-issue-deleted-without-archive ()
   "With no archive file, an issue closed long ago is deleted from the file."
   (org-linear-test--with-board
@@ -703,7 +754,7 @@ A string is an error message."
                                   (symbol-file 'org-linear-sync 'defun))
                            (not (ignore-errors
                                   (catch 'found
-                                    (dolist (key '("m" "v" "b" "t" "c" "s" "a" "l"))
+                                    (dolist (key '("m" "v" "b" "t" "c" "x" "X" "s" "a" "l"))
                                       (when (memq sym (flatten-tree
                                                        (transient-get-suffix 'org-linear-menu key)))
                                         (throw 'found t)))))))
@@ -754,7 +805,7 @@ A string is an error message."
 
 (ert-deftest org-linear-test-menu-shows-every-key ()
   "No menu key is hidden, so every command is offered wherever the menu opens."
-  (dolist (key '("m" "v" "b" "t" "c" "s" "a" "l"))
+  (dolist (key '("m" "v" "b" "t" "c" "x" "X" "s" "a" "l"))
     (should-not (plist-get (cdr (transient-get-suffix 'org-linear-menu key)) :if))))
 
 (ert-deftest org-linear-test-menu-auto-sync-label ()

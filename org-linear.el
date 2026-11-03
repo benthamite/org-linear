@@ -543,6 +543,79 @@ Finish the note as usual; the next sync posts it as a comment.  Under
   (interactive)
   (find-file (org-linear--ensure-file)))
 
+(defconst org-linear--unsent-refusal "holds edits or notes not yet in Linear; sync first"
+  "Why an issue with unsent changes is not archived.")
+
+;;;###autoload
+(defun org-linear-archive ()
+  "Move the closed issue at point to `org-linear-archive-file'.
+The sync then leaves it out of the file unless it is reopened.  On a
+heading that is not an issue, archive it as `org-archive-subtree' does."
+  (interactive)
+  (if-let* ((id (and org-linear-archive-file (org-linear--file-p)
+                     (org-entry-get nil "LINEAR_UUID"))))
+      (let ((marker (org-linear--marker)))
+        (org-linear--check-can-archive)
+        (when-let* ((reason (org-linear--archive-refusal id marker)))
+          (user-error "Not archived: %s %s" (org-entry-get nil "LINEAR_ID") reason))
+        (org-linear--archive-issues (list (cons id marker))))
+    (call-interactively #'org-archive-subtree)))
+
+;;;###autoload
+(defun org-linear-archive-closed ()
+  "Move every closed issue in `org-linear-file' to `org-linear-archive-file'.
+The sync then leaves them out of the file unless they are reopened.
+Issues whose headings hold edits or notes not yet in Linear stay."
+  (interactive)
+  (with-current-buffer (org-linear--buffer)
+    (org-linear--check-can-archive)
+    (let (closed (unsent 0))
+      (maphash (lambda (id marker)
+                 (pcase (org-linear--archive-refusal id marker)
+                   ('nil (push (cons id marker) closed))
+                   ((pred (equal org-linear--unsent-refusal)) (cl-incf unsent))))
+               (org-with-wide-buffer (save-excursion (plist-get (org-linear--index) :tasks))))
+      (org-linear--archive-issues (sort closed (lambda (a b) (< (cdr a) (cdr b)))))
+      (message "Archived %d closed issues to %s%s" (length closed)
+               (abbreviate-file-name (org-linear--archive-file-name))
+               (if (> unsent 0)
+                   (format "; %d with edits not yet in Linear stayed" unsent)
+                 "")))))
+
+(defun org-linear--check-can-archive ()
+  "Signal an error unless issues can be archived now."
+  (unless org-linear-archive-file
+    (user-error "Set `org-linear-archive-file' to archive issues"))
+  (when org-linear--busy
+    (user-error "A Linear sync is running; archive when it ends")))
+
+(defun org-linear--archive-refusal (id marker)
+  "Return why the issue ID at MARKER cannot be archived now, or nil."
+  (org-linear--load-state)
+  (let ((base (gethash id (org-linear--state-tasks))))
+    (cond
+     ((null base) "has not been synced yet")
+     ((not (member (org-with-point-at marker (org-get-todo-state)) org-done-keywords))
+      "is open, so the sync would bring it back")
+     ((not (org-linear--unchanged-p marker base)) org-linear--unsent-refusal))))
+
+(defun org-linear--archive-issues (issues)
+  "Archive ISSUES, a list of (ID . MARKER), and save what changed.
+The file is saved only if it had no unsaved edits before."
+  (when issues
+    (let ((org-linear--archive (org-linear--open-archive))
+          (clean (not (buffer-modified-p))))
+      (unless org-linear--archive
+        (user-error "Not archived: the archive has unsaved edits or changed on disk"))
+      (let ((mark-active nil)
+            (org-loop-over-headlines-in-active-region nil))
+        (dolist (issue issues)
+          (org-linear--archive-heading (car issue) (cdr issue))))
+      (org-linear--save org-linear--archive)
+      (org-linear--save-state)
+      (when clean
+        (org-linear--save (current-buffer))))))
+
 ;;;; Menu
 
 ;;;###autoload (autoload 'org-linear-menu "org-linear" nil t)
@@ -553,7 +626,9 @@ Finish the note as usual; the next sync posts it as a comment.  Under
     ("v" "Visit" org-linear-visit)
     ("b" "Browse" org-linear-browse)
     ("t" "Todo" org-linear-my-issues-todo)
-    ("c" "Comment" org-linear-comment)]
+    ("c" "Comment" org-linear-comment)
+    ("x" "Archive" org-linear-archive)
+    ("X" "Archive closed" org-linear-archive-closed)]
    ["Sync"
     ("s" "Sync" org-linear-sync)
     ("a" org-linear-auto-sync-mode
@@ -583,8 +658,18 @@ Finish the note as usual; the next sync posts it as a comment.  Under
     (when-let* ((buffer (find-buffer-visiting org-linear-file)))
       (with-current-buffer buffer (org-linear-file-mode 1)))))
 
+(defvar org-linear-file-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [remap org-archive-subtree] #'org-linear-archive)
+    map)
+  "Keymap of `org-linear-file-mode'.")
+
 (define-minor-mode org-linear-file-mode
-  "Send the file's changes to Linear whenever it is saved."
+  "Send the file's changes to Linear whenever it is saved.
+Archiving an issue moves it to `org-linear-archive-file' and keeps it
+out of the file while it stays closed.
+
+\\{org-linear-file-mode-map}"
   :lighter " Linear"
   :group 'org-linear
   (if org-linear-file-mode
@@ -1052,7 +1137,16 @@ CONVERTED maps conversion keys to Org text."
                (unless (gethash id seen)
                  (org-linear--remove-if-unchanged id marker "left Linear")))
              (plist-get index :tasks))
+    (org-linear--prune-archived seen)
     (nconc ops (org-linear--creation-ops index))))
+
+(defun org-linear--prune-archived (seen)
+  "Forget archived issues not in SEEN, the IDs this sync fetched.
+Linear sends a closed issue only while it is recent, and a reopened one
+comes back whatever this list holds."
+  (plist-put org-linear--state :archived
+             (seq-filter (lambda (id) (gethash id seen))
+                         (plist-get org-linear--state :archived))))
 
 (defun org-linear--apply-task (task converted comments projects index)
   "Apply TASK to the file and return the edits to send for it.
@@ -1083,11 +1177,21 @@ holds unsent edits, and its heading goes once it has none."
      ((gethash id (plist-get index :pending))
       ;; Created by a sync whose answer was lost; its creation links it.
       nil)
+     ((and (eq (alist-get 'closed task) t)
+           (member id (plist-get org-linear--state :archived)))
+      ;; Archived while closed; it comes back if reopened.
+      nil)
      (t
       (remhash id (org-linear--state-tasks))
       (when (org-linear--in-scope-p task)
+        (org-linear--forget-archived id)
         (org-linear--insert-task task converted comments projects index))
       nil))))
+
+(defun org-linear--forget-archived (id)
+  "Drop issue ID from the archived issues."
+  (plist-put org-linear--state :archived
+             (delete id (plist-get org-linear--state :archived))))
 
 (defun org-linear--merge (task converted comments projects index marker base)
   "Merge TASK with its heading at MARKER three-way against BASE.
@@ -2051,6 +2155,9 @@ cannot take in this sync stays for a later one."
                       (or (car (org-get-outline-path)) "No project")))))
         (org-linear--archive-subtree)))
     (remhash id (org-linear--state-tasks))
+    (unless (member id (plist-get org-linear--state :archived))
+      (plist-put org-linear--state :archived
+                 (cons id (plist-get org-linear--state :archived))))
     (org-linear--count :archived)))
 
 (defun org-linear--archive-buffer ()
@@ -2227,7 +2334,8 @@ Open issues do, and closed ones for `org-linear-closed-retention-days'."
                   :rejected-adds (plist-get saved :rejected-adds)
                   :me-tag (plist-get saved :me-tag)
                   :user-tags (plist-get saved :user-tags)
-                  :label-tags (plist-get saved :label-tags))))))
+                  :label-tags (plist-get saved :label-tags)
+                  :archived (plist-get saved :archived))))))
 
 (defun org-linear--save-state ()
   "Write the sync state to `org-linear-state-file'.
@@ -2247,6 +2355,7 @@ write cut short leaves the previous state whole."
                            :me-tag (plist-get org-linear--state :me-tag)
                            :user-tags (plist-get org-linear--state :user-tags)
                            :label-tags (plist-get org-linear--state :label-tags)
+                           :archived (plist-get org-linear--state :archived)
                            :tasks entries)
                      (current-buffer))))
           (rename-file temp org-linear-state-file t))
