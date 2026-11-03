@@ -270,9 +270,10 @@ A string is an error message."
      (cl-letf (((symbol-function 'org-linear--graphql) #'org-linear-test--graphql))
        (unwind-protect
            (progn ,@body)
-         (when-let* ((buffer (find-buffer-visiting org-linear-file)))
-           (with-current-buffer buffer (set-buffer-modified-p nil))
-           (kill-buffer buffer))
+         (dolist (file (list org-linear-file (org-linear--archive-file-name)))
+           (when-let* ((buffer (find-buffer-visiting file)))
+             (with-current-buffer buffer (set-buffer-modified-p nil))
+             (kill-buffer buffer)))
          (when (get-buffer org-linear--log-buffer)
            (kill-buffer org-linear--log-buffer))
          (delete-directory org-linear-test--dir t)))))
@@ -300,6 +301,19 @@ A string is an error message."
   "Return the text of the mirrored file's buffer."
   (with-current-buffer (find-buffer-visiting org-linear-file)
     (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun org-linear-test--archive-text ()
+  "Return the text of the archive file on disk, or nil if there is none."
+  (let ((file (org-linear--archive-file-name)))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (buffer-string)))))
+
+(defun org-linear-test--close-long-ago (id)
+  "Close fake issue ID in Linear, long enough ago to leave the file."
+  (org-linear-test--edit id 'state (org-linear-test--state "s-done"))
+  (org-linear-test--edit id 'completedAt "2026-01-02T10:00:00Z"))
 
 (defun org-linear-test--log ()
   "Return the sync log's text."
@@ -394,14 +408,72 @@ A string is an error message."
     (org-linear-test--goto "ENG-1")
     (should (equal (org-linear--heading-project) "p-b"))))
 
-(ert-deftest org-linear-test-closed-issue-leaves ()
-  "An issue closed long ago in Linear leaves the file."
+(ert-deftest org-linear-test-closed-issue-archived ()
+  "An issue closed long ago moves to the archive, under its project."
   (org-linear-test--with-board
     (org-linear-test--sync)
-    (org-linear-test--edit "i2" 'state (org-linear-test--state "s-done"))
-    (org-linear-test--edit "i2" 'completedAt "2026-01-02T10:00:00Z")
+    (should-not (org-linear-test--archive-text))
+    (org-linear-test--close-long-ago "i2")
     (org-linear-test--sync)
-    (should-not (string-match-p "Joint task" (org-linear-test--text)))))
+    (should-not (string-match-p "Joint task" (org-linear-test--text)))
+    (let ((archive (org-linear-test--archive-text)))
+      (should (equal (org-linear--archive-file-name)
+                     (expand-file-name "linear-archive.org" org-linear-test--dir)))
+      (should (string-match-p "^#\\+TODO: TRIAGE" archive))
+      (should (string-match-p "^\\* Project A\n+\\*\\* DONE .*Joint task" archive))
+      (should (string-match-p ":LINEAR_ID: +ENG-2" archive))
+      (should (string-match-p ":ARCHIVE_OLPATH: Project A" archive)))
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (should-not (buffer-modified-p)))
+    (with-current-buffer (find-buffer-visiting (org-linear--archive-file-name))
+      (should-not (buffer-modified-p)))
+    (org-linear-test--sync)
+    (should (= 1 (with-temp-buffer
+                   (insert (org-linear-test--archive-text))
+                   (count-matches "Joint task" (point-min) (point-max)))))))
+
+(ert-deftest org-linear-test-archive-leaves-kill-ring ()
+  "Archiving touches neither the kill ring nor the clipboard."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--close-long-ago "i2")
+    (let ((kill-ring (list "mine"))
+          (kill-ring-yank-pointer nil)
+          (copied nil)
+          (interprogram-cut-function (lambda (text) (setq copied text))))
+      (org-linear-test--sync)
+      (should (equal kill-ring '("mine")))
+      (should-not copied))))
+
+(ert-deftest org-linear-test-archive-waits-for-unsaved-archive ()
+  "An archive with unsaved edits keeps closed issues in the file until saved."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--close-long-ago "i1")
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting (org-linear--archive-file-name))
+      (goto-char (point-max))
+      (insert "My unsaved note.\n"))
+    (org-linear-test--close-long-ago "i2")
+    (org-linear-test--sync)
+    (should (string-match-p "Joint task" (org-linear-test--text)))
+    (should (string-match-p "Not archived: .* has unsaved edits" (org-linear-test--log)))
+    (with-current-buffer (find-buffer-visiting (org-linear--archive-file-name))
+      (save-buffer))
+    (org-linear-test--sync)
+    (should-not (string-match-p "Joint task" (org-linear-test--text)))
+    (should (string-match-p "Joint task" (org-linear-test--archive-text)))
+    (should (string-match-p "My unsaved note" (org-linear-test--archive-text)))))
+
+(ert-deftest org-linear-test-closed-issue-deleted-without-archive ()
+  "With no archive file, an issue closed long ago is deleted from the file."
+  (org-linear-test--with-board
+    (let ((org-linear-archive-file nil))
+      (org-linear-test--sync)
+      (org-linear-test--close-long-ago "i2")
+      (org-linear-test--sync)
+      (should-not (string-match-p "Joint task" (org-linear-test--text)))
+      (should-not (directory-files org-linear-test--dir nil "archive")))))
 
 ;;;; Push
 
@@ -772,19 +844,34 @@ A string is an error message."
     (org-linear-test--sync)
     (should-not (string-match-p "Joint task" (org-linear-test--text)))))
 
-(ert-deftest org-linear-test-subheadings-survive-closing ()
-  "A closed issue's heading with a subheading of yours stays in the file."
+(defun org-linear-test--add-subheading-to (identifier)
+  "Give the heading of IDENTIFIER a subheading of the user's, and save."
+  (org-linear-test--goto identifier)
+  (org-linear-test--editing
+    (org-end-of-subtree t t)
+    (insert "*** My private notes\nKeep these.\n")
+    (save-buffer)))
+
+(ert-deftest org-linear-test-subheadings-archived-with-issue ()
+  "A closed issue's subheadings of yours move to the archive with it."
   (org-linear-test--with-board
     (org-linear-test--sync)
-    (org-linear-test--goto "ENG-2")
-    (org-linear-test--editing
-      (org-end-of-subtree t t)
-      (insert "*** My private notes\nKeep these.\n")
-      (save-buffer))
-    (org-linear-test--edit "i2" 'state (org-linear-test--state "s-done"))
-    (org-linear-test--edit "i2" 'completedAt "2026-01-02T10:00:00Z")
+    (org-linear-test--add-subheading-to "ENG-2")
+    (org-linear-test--close-long-ago "i2")
     (org-linear-test--sync)
-    (should (string-match-p "Keep these" (org-linear-test--text)))))
+    (should-not (string-match-p "Keep these" (org-linear-test--text)))
+    (should (string-match-p "^\\*\\*\\* My private notes\nKeep these"
+                            (org-linear-test--archive-text)))))
+
+(ert-deftest org-linear-test-subheadings-survive-closing ()
+  "Without an archive, a closed issue's heading with a subheading stays."
+  (org-linear-test--with-board
+    (let ((org-linear-archive-file nil))
+      (org-linear-test--sync)
+      (org-linear-test--add-subheading-to "ENG-2")
+      (org-linear-test--close-long-ago "i2")
+      (org-linear-test--sync)
+      (should (string-match-p "Keep these" (org-linear-test--text))))))
 
 (ert-deftest org-linear-test-sync-edits-not-undoable ()
   "Edits the sync applies leave nothing for undo to revert."

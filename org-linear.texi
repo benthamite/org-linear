@@ -218,7 +218,12 @@ Deleting a heading does not delete the issue: it comes back at the next sync, wi
 @node Closed issues
 @section Closed issues
 
-The file holds every open issue of the teams and the issues closed in the last @code{org-linear-closed-retention-days} days. Older closed issues leave the file at the next sync, unless their heading holds something not yet in Linear: unsent edits or notes, or subheadings of your own. Such a heading stays, keeps syncing its edits, and leaves once it has nothing unsent; subheadings keep it for good, and the sync log says so.
+The file holds every open issue of the teams and the issues closed in the last @code{org-linear-closed-retention-days} days. Older closed issues leave the file at the next sync, unless their heading holds unsent edits or notes; such a heading stays, keeps syncing its edits, and leaves once it has nothing unsent.
+
+@vindex org-linear-archive-file
+An issue that leaves moves to the archive file named by @code{org-linear-archive-file}, under a heading named after its project, with the properties Org's archiving adds (@samp{ARCHIVE_TIME}, @samp{ARCHIVE_OLPATH} and the like). Your subheadings and notes go with it. By default the archive is @samp{linear-archive.org} next to @samp{linear.org}: a @samp{%s} in the option stands for the name of @code{org-linear-file} without its directory and extension, and a relative name is relative to that file's directory. The sync creates the archive with the file's @samp{#+TODO} and @samp{#+PRIORITIES} lines and saves it before the file. While the archive's buffer has unsaved edits, or the archive changed on disk, closed issues stay in the file and the sync log says why; they move at the first sync after you save or revert it. Neither the kill ring nor the clipboard is touched.
+
+Set @code{org-linear-archive-file} to @samp{nil} to delete closed issues instead. A heading with subheadings of your own then stays in the file for good, and the sync log says so.
 
 @node Syncing
 @chapter Syncing
@@ -333,7 +338,7 @@ The user option @code{org-linear-teams} lists the keys of the teams whose issues
 @code{org-linear-state-file} holds each issue as it was at the last sync, by default @samp{org-linear/state.eld} under @samp{$XDG_STATE_HOME} or @samp{~/.local/state}. Deleting it makes the next sync treat Linear's values as the starting point. The sync replaces it whole on each write, so a write cut short, by a crash or a full disk, leaves the previous state intact.
 
 @vindex org-linear-closed-retention-days
-@code{org-linear-closed-retention-days}, 7 by default, is how many days a closed issue stays in the file.
+@code{org-linear-closed-retention-days}, 7 by default, is how many days a closed issue stays in the file before it moves to the archive (@ref{Closed issues}).
 
 @vindex org-linear-pull-interval
 @code{org-linear-pull-interval}, 600 by default, is the number of seconds between background syncs in @code{org-linear-auto-sync-mode}.
@@ -379,7 +384,7 @@ The key reaches @samp{curl} on its standard input, never on its command line, wh
 @end lisp
 
 @vindex org-linear-user-tags
-@code{org-linear-user-tags} maps team members' names to tags. A member not listed gets the first word of their name in lower case, or their full name, as in "peter_hartree", when another member would get the same tag, so that a tag always stands for one person. Members of other teams have no tag; an issue assigned to one of them keeps that assignee, since the file cannot represent it.
+@code{org-linear-user-tags} maps team members' names to tags. A member not listed gets the first word of their name in lower case, or their full name, as in ``peter@math{_hartree}'', when another member would get the same tag, so that a tag always stands for one person. Members of other teams have no tag; an issue assigned to one of them keeps that assignee, since the file cannot represent it.
 
 @node Programs
 @section Programs

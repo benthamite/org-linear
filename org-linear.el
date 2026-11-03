@@ -45,6 +45,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'org)
+(require 'org-archive)
 (require 'org-id)
 (require 'seq)
 (require 'subr-x)
@@ -165,8 +166,21 @@ is set.  When it is nil, `SCHEDULED' stays in the file and is never sent."
   :group 'org-linear)
 
 (defcustom org-linear-closed-retention-days 7
-  "Days a closed issue stays in the file after it was closed."
+  "Days a closed issue stays in the file after it was closed.
+Afterwards it moves to `org-linear-archive-file', or is deleted."
   :type 'integer
+  :group 'org-linear)
+
+(defcustom org-linear-archive-file "%s-archive.org"
+  "Org file that closed issues move to when they leave the file, or nil.
+A \"%s\" in the name stands for the name of `org-linear-file' without its
+directory and extension, and a relative name is relative to that file's
+directory: the default gives \"linear-archive.org\" next to \"linear.org\".
+Issues are filed under their project's heading, with Org's archive
+properties, as `org-archive-subtree' does.  When nil, closed issues are
+deleted from the file instead, unless their heading holds something not
+in Linear."
+  :type '(choice (const :tag "Delete closed issues" nil) file)
   :group 'org-linear)
 
 (defcustom org-linear-pull-interval 600
@@ -267,6 +281,11 @@ agenda.")
 (defvar org-linear--saving nil
   "Non-nil while the sync itself saves the file.")
 
+(defvar org-linear--archive nil
+  "The archive's buffer while a sync applies its changes.
+`unknown' until a closed issue first needs it; then the buffer, or nil
+when the archive cannot take issues in this sync.")
+
 (defvar org-linear--timer nil
   "Timer of `org-linear-auto-sync-mode'.")
 
@@ -303,7 +322,7 @@ it changes nothing; background syncs report only changes."
     (setq org-linear--busy t
           org-linear--pending nil
           org-linear--rerun nil
-          org-linear--stats (list :pulled 0 :pushed 0 :created 0
+          org-linear--stats (list :pulled 0 :pushed 0 :created 0 :archived 0
                                   :conflicts 0 :errors 0))
     (condition-case err
         (org-linear--start)
@@ -984,10 +1003,15 @@ An Org heading inside an issue's body would split the issue."
    ((not (verify-visited-file-modtime buffer))
     (org-linear--fail "the file changed on disk; revert its buffer, then sync"))
    (t
-    (let (ops)
+    (let ((org-linear--archive 'unknown)
+          ops)
       (with-current-buffer buffer
         (setq ops (org-linear--with-sync-edits
                    (lambda () (org-linear--apply data converted)))))
+      ;; The archive first: a save cut short then leaves an issue in both
+      ;; files rather than in neither.
+      (when (bufferp org-linear--archive)
+        (org-linear--save org-linear--archive))
       (org-linear--save buffer)
       (org-linear--save-state)
       (org-linear--run-ops ops)))))
@@ -1052,7 +1076,9 @@ holds unsent edits, and its heading goes once it has none."
      (marker
       (let ((ops (org-linear--merge task converted comments projects index marker base)))
         (when (and (null ops) (not (org-linear--in-scope-p task)))
-          (org-linear--remove-if-unchanged id marker nil))
+          (if org-linear-archive-file
+              (org-linear--archive-heading id marker)
+            (org-linear--remove-if-unchanged id marker nil)))
         ops))
      ((gethash id (plist-get index :pending))
       ;; Created by a sync whose answer was lost; its creation links it.
@@ -1616,9 +1642,12 @@ not sent again while later edits still go through."
         (more (or org-linear--pending org-linear--rerun)))
     (cond
      ((cl-some (lambda (k) (> (plist-get s k) 0))
-               '(:pulled :pushed :created :conflicts :errors))
-      (message "Linear sync: %d from Linear, %d sent, %d created%s"
+               '(:pulled :pushed :created :archived :conflicts :errors))
+      (message "Linear sync: %d from Linear, %d sent, %d created%s%s"
                (plist-get s :pulled) (plist-get s :pushed) (plist-get s :created)
+               (if (> (plist-get s :archived) 0)
+                   (format ", %d archived" (plist-get s :archived))
+                 "")
                (if (> (+ (plist-get s :conflicts) (plist-get s :errors)) 0)
                    (format ", %d conflicts, %d rejected (M-x org-linear-show-log)"
                            (plist-get s :conflicts) (plist-get s :errors))
@@ -2008,6 +2037,87 @@ written when the heading stays."
         (org-linear--log "Kept \"%s\": it %s, but the heading holds edits, notes or subheadings not in Linear"
                          (org-with-point-at marker (org-get-heading t t t t))
                          reason)))))
+
+(defun org-linear--archive-heading (id marker)
+  "Move the heading at MARKER of issue ID to the archive.
+It goes under a heading named after its project.  A heading the archive
+cannot take in this sync stays for a later one."
+  (when-let* ((archive (org-linear--archive-buffer)))
+    (org-with-point-at marker
+      (let ((org-archive-location
+             (concat (org-linear--escape-percent (buffer-file-name archive))
+                     "::* "
+                     (org-linear--escape-percent
+                      (or (car (org-get-outline-path)) "No project")))))
+        (org-linear--archive-subtree)))
+    (remhash id (org-linear--state-tasks))
+    (org-linear--count :archived)))
+
+(defun org-linear--archive-buffer ()
+  "Return the archive's buffer for this sync, or nil if it cannot take issues."
+  (when (eq org-linear--archive 'unknown)
+    (setq org-linear--archive (org-linear--open-archive)))
+  org-linear--archive)
+
+(defun org-linear--open-archive ()
+  "Return a buffer visiting the archive, creating the file if missing.
+Return nil, and log why, when the archive's buffer has unsaved edits or
+its file changed on disk, which the sync must not overwrite."
+  (let* ((file (org-linear--archive-file-name))
+         (buffer (find-buffer-visiting file)))
+    (cond
+     ((and buffer (or (buffer-modified-p buffer)
+                      (not (verify-visited-file-modtime buffer))))
+      (org-linear--log "Not archived: %s has unsaved edits or changed on disk; save or revert it"
+                       (abbreviate-file-name file))
+      nil)
+     (buffer)
+     (t (org-linear--ensure-archive-file file)
+        (find-file-noselect file)))))
+
+(defun org-linear--archive-file-name ()
+  "Return the absolute name of `org-linear-archive-file'."
+  (expand-file-name
+   (string-replace "%s" (file-name-base org-linear-file) org-linear-archive-file)
+   (file-name-directory (expand-file-name org-linear-file))))
+
+(defun org-linear--ensure-archive-file (file)
+  "Create FILE, the archive, with a header taken from the current buffer."
+  (unless (file-exists-p file)
+    (let ((header (org-linear--archive-header)))
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file (insert header)))))
+
+(defun org-linear--archive-header ()
+  "Return a header for a new archive of the current buffer.
+It copies the buffer's TODO, priority and startup lines, so that the
+archive reads the issues' keywords and cookies as the file does."
+  (let ((case-fold-search t)
+        (title (cadr (assoc "TITLE" (org-collect-keywords '("TITLE")))))
+        lines)
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (while (re-search-forward
+             "^#\\+\\(?:\\(?:SEQ_\\|TYP_\\)?TODO\\|PRIORITIES\\|STARTUP\\):.*$" nil t)
+       (push (match-string-no-properties 0) lines)))
+    (concat "#+TITLE: " (or title "Linear") " (archive)\n"
+            (mapconcat (lambda (line) (concat line "\n")) (nreverse lines) ""))))
+
+(defun org-linear--escape-percent (text)
+  "Return TEXT with each % doubled, for a string `format' will read."
+  (string-replace "%" "%%" text))
+
+(defun org-linear--archive-subtree ()
+  "Archive the subtree at point, leaving the kill ring and clipboard alone.
+The sync saves the archive itself, before the file."
+  (let ((kill-ring nil)
+        (kill-ring-yank-pointer nil)
+        (interprogram-cut-function nil)
+        (interprogram-paste-function nil)
+        (last-command nil)
+        (org-archive-subtree-save-file-p nil)
+        (inhibit-message t))
+    (org-archive-subtree)))
 
 (defun org-linear--unchanged-p (marker base)
   "Return non-nil if the heading at MARKER matches BASE and has no new notes."
