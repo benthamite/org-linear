@@ -613,10 +613,49 @@ A string is an error message."
   (dolist (entry '(("m" . org-linear-my-issues)
                    ("v" . org-linear-visit) ("o" . org-linear-browse)
                    ("s" . org-linear-sync) ("a" . org-linear-auto-sync-mode)
-                   ("l" . org-linear-show-log)))
+                   ("l" . org-linear-show-log) ("t" . org-linear-my-issues-todo)
+                   ("c" . org-linear-comment)))
     (let ((suffix (transient-get-suffix 'org-linear-menu (car entry))))
       (should (memq (cdr entry) (flatten-tree suffix)))
       (should (commandp (cdr entry))))))
+
+(ert-deftest org-linear-test-menu-lists-every-command ()
+  "Every command of the package is in the menu, except the modes it manages itself."
+  (let ((exempt '(org-linear-menu org-linear-file-mode org-linear-my-issues-mode))
+        missing)
+    (mapatoms (lambda (sym)
+                (when (and (commandp sym)
+                           (string-prefix-p "org-linear-" (symbol-name sym))
+                           (not (memq sym exempt))
+                           (equal (symbol-file sym 'defun)
+                                  (symbol-file 'org-linear-sync 'defun))
+                           (not (ignore-errors
+                                  (catch 'found
+                                    (dolist (key '("m" "v" "o" "t" "c" "s" "a" "l"))
+                                      (when (memq sym (flatten-tree
+                                                       (transient-get-suffix 'org-linear-menu key)))
+                                        (throw 'found t)))))))
+                  (push sym missing))))
+    (should-not missing)))
+
+(ert-deftest org-linear-test-comment-uses-the-right-note-command ()
+  "Commenting adds an Org note in the file and an agenda note in the list."
+  (require 'org-agenda)
+  (let (called)
+    (cl-letf (((symbol-function 'org-add-note) (lambda () (setq called 'org)))
+              ((symbol-function 'org-agenda-add-note) (lambda (&rest _) (setq called 'agenda))))
+      (with-temp-buffer
+        (org-mode)
+        (org-linear-comment)
+        (should (eq called 'org)))
+      (with-temp-buffer
+        (org-agenda-mode)
+        (org-linear-comment)
+        (should (eq called 'agenda))))))
+
+(ert-deftest org-linear-test-list-opens-menu ()
+  "M in the list of your issues opens the menu."
+  (should (eq (lookup-key org-linear-my-issues-mode-map "M") #'org-linear-menu)))
 
 (ert-deftest org-linear-test-menu-issue-predicate ()
   "The open-issue key is offered only on an entry with a Linear issue."

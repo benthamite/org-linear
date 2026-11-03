@@ -362,18 +362,20 @@ when `org-agenda-sticky' would reuse it, and it then syncs, as
       (setq org-linear--refresh-list nil))))
 
 (declare-function org-agenda-todo "org-agenda" (&optional arg))
+(declare-function org-agenda-add-note "org-agenda" (&optional arg))
 (declare-function org-agenda-redo "org-agenda" (&optional all))
 
 (defvar org-linear-my-issues-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map "t" #'org-linear-my-issues-todo)
+    (define-key map "M" #'org-linear-menu)
     map)
   "Keymap of `org-linear-my-issues-mode'.")
 
 (define-minor-mode org-linear-my-issues-mode
   "Minor mode for the list of `org-linear-my-issues'.
 Changing an issue's status rebuilds the list, so that the issue moves to
-its new section at once."
+its new section at once.  \\<org-linear-my-issues-mode-map>\\[org-linear-menu] opens `org-linear-menu'."
   :keymap org-linear-my-issues-mode-map)
 
 (defun org-linear--list-setup ()
@@ -489,6 +491,16 @@ on the lines it builds; `org-linear--apply-faces' turns it into a face."
     (user-error "No Linear issue at point")))
 
 ;;;###autoload
+(defun org-linear-comment ()
+  "Add a note to the issue at point, in the file or the list of your issues.
+Finish the note as usual; the next sync posts it as a comment.  Under
+`org-linear-auto-sync-mode', saving the file starts that sync."
+  (interactive)
+  (if (derived-mode-p 'org-agenda-mode)
+      (org-agenda-add-note)
+    (org-add-note)))
+
+;;;###autoload
 (defun org-linear-show-log ()
   "Show the sync log."
   (interactive)
@@ -509,7 +521,11 @@ on the lines it builds; `org-linear--apply-faces' turns it into a face."
    ("m" "My issues" org-linear-my-issues)
    ("v" "Visit the file" org-linear-visit)
    ("o" "Open the issue at point in Linear" org-linear-browse
-    :if org-linear--issue-at-point-p)]
+    :if org-linear--issue-at-point-p)
+   ("t" "Change the status of the issue at point" org-linear-my-issues-todo
+    :if org-linear--in-list-p)
+   ("c" "Comment on the issue at point" org-linear-comment
+    :if org-linear--commentable-p)]
   ["Sync"
    ("s" "Sync now" org-linear-sync)
    ("a" org-linear-auto-sync-mode
@@ -521,6 +537,15 @@ on the lines it builds; `org-linear--apply-faces' turns it into a face."
   "Return non-nil if point is in an Org entry with a Linear issue."
   (and (derived-mode-p 'org-mode)
        (ignore-errors (org-entry-get nil "LINEAR_URL"))))
+
+(defun org-linear--in-list-p ()
+  "Return non-nil if the current buffer is the list of your issues."
+  (bound-and-true-p org-linear-my-issues-mode))
+
+(defun org-linear--commentable-p ()
+  "Return non-nil if there is an issue at point to comment on."
+  (or (org-linear--issue-at-point-p)
+      (and (org-linear--in-list-p) (org-get-at-bol 'org-hd-marker))))
 
 (defun org-linear--auto-sync-description ()
   "Return the menu's label for `org-linear-auto-sync-mode', with its state."

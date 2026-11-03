@@ -198,7 +198,7 @@ Edit issues with ordinary Org commands, then save the file; with @code{org-linea
 
 @itemize
 @item
-To comment on an issue, add a note with @samp{C-c C-z} (@code{org-add-note}). Notes attached to state changes, such as the one the default header asks for when you cancel an issue, are posted too, prefixed with the new keyword.
+To comment on an issue, add a note with @samp{C-c C-z} (@code{org-add-note}), or with @samp{M-x org-linear-comment}, which also works from the list of your issues. Notes attached to state changes, such as the one the default header asks for when you cancel an issue, are posted too, prefixed with the new keyword.
 @item
 To create an issue, add a level-2 heading with a TODO keyword under a project heading, with its description as the body. At the next sync it is created in Linear, in the project's team, and gets its @samp{LINEAR_ID}. Until Linear confirms the issue, the heading holds the ID it was sent with as @samp{LINEAR_PENDING_UUID}, so that an issue whose creation was not confirmed is found by the next sync rather than created twice.
 @item
@@ -253,7 +253,7 @@ A sync never changes the file while it has unsaved edits, and never applies chan
 
 @findex org-linear-my-issues
 @vindex org-linear-my-issues-sections
-The file holds every open issue of the teams, so it is not the place to see what is yours. @samp{M-x org-linear-my-issues} is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of @code{org-linear-my-issues-sections}. A due date that is today or past is shown in @code{org-imminent-deadline}, and one within @code{org-deadline-warning-days} in @code{org-upcoming-deadline}. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. Each call rebuilds the list, even with @code{org-agenda-sticky} on. From the list, @samp{t} changes an issue's status and rebuilds the list, so the issue moves to its new section and point lands on the next one. @samp{TAB} shows an issue's heading in another window, @samp{C-x C-s} saves the file, which sends your changes to Linear, and @samp{g} refreshes the list. Issues scheduled for a later day stay out of it until that day; every other issue is shown, whatever your @code{org-agenda-todo-ignore-*} options say. Killing the buffer of the file also kills the list, whose lines would otherwise lead nowhere.
+The file holds every open issue of the teams, so it is not the place to see what is yours. @samp{M-x org-linear-my-issues} is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of @code{org-linear-my-issues-sections}. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. A due date that is today or past is shown in @code{org-imminent-deadline}, and one within @code{org-deadline-warning-days} in @code{org-upcoming-deadline}. Each call rebuilds the list, even with @code{org-agenda-sticky} on. From the list, @samp{t} changes an issue's status and rebuilds the list, so the issue moves to its new section and point lands on the next one. @samp{M} opens @code{org-linear-menu}, @samp{TAB} shows an issue's heading in another window, @samp{C-x C-s} saves the file, which sends your changes to Linear, and @samp{g} refreshes the list. Issues scheduled for a later day stay out of it until that day; every other issue is shown, whatever your @code{org-agenda-todo-ignore-*} options say. Killing the buffer of the file also kills the list, whose lines would otherwise lead nowhere.
 
 @vindex org-linear-my-issues-sync
 The list opens at once from the file and then syncs, unless the file has unsaved edits, and it is rebuilt with point on the same issue if the sync brings changes. Set @code{org-linear-my-issues-sync} to @samp{nil} to turn this off.
@@ -273,7 +273,7 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @chapter Transient menu
 
 @findex org-linear-menu
-@samp{M-x org-linear-menu} gathers the package's commands in a transient menu. The package binds it to no key, so bind it yourself if you use it often.
+@samp{M-x org-linear-menu} gathers the package's commands in a transient menu. In the list of your issues, @samp{M} opens it; elsewhere the package binds it to no key, so bind it yourself if you use it often.
 
 @multitable {aaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Key
@@ -288,6 +288,12 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @item @samp{o}
 @tab @code{org-linear-browse}
 @tab Open the issue at point in Linear
+@item @samp{t}
+@tab @code{org-linear-my-issues-todo}
+@tab Change the status of the issue at point
+@item @samp{c}
+@tab @code{org-linear-comment}
+@tab Comment on the issue at point
 @item @samp{s}
 @tab @code{org-linear-sync}
 @tab Sync now
@@ -299,7 +305,7 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @tab Show the sync log
 @end multitable
 
-The @samp{o} key appears only when point is on an issue in the file. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
+The @samp{o} key appears only when point is on an issue in the file, the @samp{t} key only in the list of your issues, and the @samp{c} key in either. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
 
 @node User options
 @chapter User options
