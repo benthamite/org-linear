@@ -368,7 +368,7 @@ when `org-agenda-sticky' would reuse it, and it then syncs, as
 (defvar org-linear-my-issues-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map "t" #'org-linear-my-issues-todo)
-    (define-key map "M" #'org-linear-menu)
+    (define-key map "." #'org-linear-menu)
     map)
   "Keymap of `org-linear-my-issues-mode'.")
 

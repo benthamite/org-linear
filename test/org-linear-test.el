@@ -654,8 +654,8 @@ A string is an error message."
         (should (eq called 'agenda))))))
 
 (ert-deftest org-linear-test-list-opens-menu ()
-  "M in the list of your issues opens the menu."
-  (should (eq (lookup-key org-linear-my-issues-mode-map "M") #'org-linear-menu)))
+  "A dot in the list of your issues opens the menu."
+  (should (eq (lookup-key org-linear-my-issues-mode-map ".") #'org-linear-menu)))
 
 (ert-deftest org-linear-test-menu-issue-predicate ()
   "The open-issue key is offered only on an entry with a Linear issue."
