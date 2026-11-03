@@ -529,18 +529,18 @@ Finish the note as usual; the next sync posts it as a comment.  Under
 ;;;###autoload (autoload 'org-linear-menu "org-linear" nil t)
 (transient-define-prefix org-linear-menu ()
   "Visit the mirrored file and its issues, and control the sync."
-  ["Issues"
-   ("m" "My issues" org-linear-my-issues)
-   ("v" "Visit the file" org-linear-visit)
-   ("o" "Open the issue at point in Linear" org-linear-browse)
-   ("t" "Change the status of the issue at point" org-linear-my-issues-todo)
-   ("c" "Comment on the issue at point" org-linear-comment)]
-  ["Sync"
-   ("s" "Sync now" org-linear-sync)
-   ("a" org-linear-auto-sync-mode
-    :description org-linear--auto-sync-description
-    :transient t)
-   ("l" "Show the log" org-linear-show-log)])
+  [["Issues"
+    ("m" "My issues" org-linear-my-issues)
+    ("v" "Visit" org-linear-visit)
+    ("b" "Browse" org-linear-browse)
+    ("t" "Todo" org-linear-my-issues-todo)
+    ("c" "Comment" org-linear-comment)]
+   ["Sync"
+    ("s" "Sync" org-linear-sync)
+    ("a" org-linear-auto-sync-mode
+     :description org-linear--auto-sync-description
+     :transient t)
+    ("l" "Show log" org-linear-show-log)]])
 
 (defun org-linear--auto-sync-description ()
   "Return the menu's label for `org-linear-auto-sync-mode', with its state."

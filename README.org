@@ -141,7 +141,7 @@ Edit issues with ordinary Org commands, then save the file; with ~org-linear-aut
 Deleting a heading does not delete the issue: it comes back at the next sync, with its description and comments. To drop an issue, cancel it.
 
 #+findex: org-linear-browse
-=M-x org-linear-browse= opens the issue at point in your browser.
+=M-x org-linear-browse= browses the issue at point in Linear, in the file or the list of your issues.
 
 #+findex: org-linear-visit
 =M-x org-linear-visit= visits ~org-linear-file~.
@@ -213,14 +213,14 @@ Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with t
 |-----+-----------------------------+----------------------------------------------|
 | =m= | ~org-linear-my-issues~      | Show your open issues                        |
 | =v= | ~org-linear-visit~          | Visit the file                               |
-| =o= | ~org-linear-browse~         | Open the issue at point in Linear            |
+| =b= | ~org-linear-browse~         | Browse the issue at point in Linear          |
 | =t= | ~org-linear-my-issues-todo~ | Change the status of the issue at point      |
 | =c= | ~org-linear-comment~        | Comment on the issue at point                |
 | =s= | ~org-linear-sync~           | Sync now                                     |
 | =a= | ~org-linear-auto-sync-mode~ | Turn syncing on save, visit and timer on/off |
 | =l= | ~org-linear-show-log~       | Show the sync log                            |
 
-Every key is always shown; =o=, =t= and =c= act on the issue at point, in the file or in the list of your issues. The =a= key shows whether the mode is on, and the menu stays open after you press it.
+Every key is always shown; =b=, =t= and =c= act on the issue at point, in the file or in the list of your issues. The =a= key shows whether the mode is on, and the menu stays open after you press it.
 
 * User options
 :PROPERTIES:

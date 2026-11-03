@@ -611,7 +611,7 @@ A string is an error message."
 (ert-deftest org-linear-test-menu-commands-exist ()
   "Every key of the menu runs an existing command."
   (dolist (entry '(("m" . org-linear-my-issues)
-                   ("v" . org-linear-visit) ("o" . org-linear-browse)
+                   ("v" . org-linear-visit) ("b" . org-linear-browse)
                    ("s" . org-linear-sync) ("a" . org-linear-auto-sync-mode)
                    ("l" . org-linear-show-log) ("t" . org-linear-my-issues-todo)
                    ("c" . org-linear-comment)))
@@ -631,7 +631,7 @@ A string is an error message."
                                   (symbol-file 'org-linear-sync 'defun))
                            (not (ignore-errors
                                   (catch 'found
-                                    (dolist (key '("m" "v" "o" "t" "c" "s" "a" "l"))
+                                    (dolist (key '("m" "v" "b" "t" "c" "s" "a" "l"))
                                       (when (memq sym (flatten-tree
                                                        (transient-get-suffix 'org-linear-menu key)))
                                         (throw 'found t)))))))
@@ -682,7 +682,7 @@ A string is an error message."
 
 (ert-deftest org-linear-test-menu-shows-every-key ()
   "No menu key is hidden, so every command is offered wherever the menu opens."
-  (dolist (key '("m" "v" "o" "t" "c" "s" "a" "l"))
+  (dolist (key '("m" "v" "b" "t" "c" "s" "a" "l"))
     (should-not (plist-get (cdr (transient-get-suffix 'org-linear-menu key)) :if))))
 
 (ert-deftest org-linear-test-menu-auto-sync-label ()

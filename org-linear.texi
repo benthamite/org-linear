@@ -210,7 +210,7 @@ To assign an issue, tag it with the person's tag; an issue has one assignee, so 
 Deleting a heading does not delete the issue: it comes back at the next sync, with its description and comments. To drop an issue, cancel it.
 
 @findex org-linear-browse
-@samp{M-x org-linear-browse} opens the issue at point in your browser.
+@samp{M-x org-linear-browse} browses the issue at point in Linear, in the file or the list of your issues.
 
 @findex org-linear-visit
 @samp{M-x org-linear-visit} visits @code{org-linear-file}.
@@ -285,9 +285,9 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @item @samp{v}
 @tab @code{org-linear-visit}
 @tab Visit the file
-@item @samp{o}
+@item @samp{b}
 @tab @code{org-linear-browse}
-@tab Open the issue at point in Linear
+@tab Browse the issue at point in Linear
 @item @samp{t}
 @tab @code{org-linear-my-issues-todo}
 @tab Change the status of the issue at point
@@ -305,7 +305,7 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @tab Show the sync log
 @end multitable
 
-Every key is always shown; @samp{o}, @samp{t} and @samp{c} act on the issue at point, in the file or in the list of your issues. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
+Every key is always shown; @samp{b}, @samp{t} and @samp{c} act on the issue at point, in the file or in the list of your issues. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
 
 @node User options
 @chapter User options
