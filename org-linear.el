@@ -323,7 +323,10 @@ it changes nothing; background syncs report only changes."
 (defun org-linear-my-issues ()
   "Show your open issues in an agenda, grouped by status.
 Issues assigned to others are left out, as `org-linear-agenda-skip'
-decides, and so are issues scheduled for a later day.  The sections are
+decides, and so are issues scheduled for a later day, whatever the
+`org-agenda-todo-ignore-*' options say.  A due date is shown in
+`org-imminent-deadline' once it is today or past, and in
+`org-upcoming-deadline' within `org-deadline-warning-days'.  The sections are
 `org-linear-my-issues-sections'.  The list is rebuilt on each call, even
 when `org-agenda-sticky' would reuse it, and it then syncs, as
 `org-linear-my-issues-sync' says."
@@ -345,6 +348,9 @@ when `org-agenda-sticky' would reuse it, and it then syncs, as
               (org-agenda-skip-function-global #'org-linear-agenda-skip)
               (org-agenda-prefix-format '((todo . " %(org-linear--agenda-context) ")))
               (org-agenda-todo-keyword-format "")
+              (org-agenda-todo-ignore-with-date nil)
+              (org-agenda-todo-ignore-deadlines nil)
+              (org-agenda-todo-ignore-timestamp nil)
               (org-agenda-todo-ignore-scheduled 'future)
               (org-agenda-finalize-hook '(org-linear--list-setup))
               (org-agenda-sorting-strategy '((todo deadline-up priority-down alpha-up))))))))
@@ -375,9 +381,19 @@ its new section at once."
 Killing the buffer of `org-linear-file' kills the list too, since its
 lines would no longer lead to any heading."
   (setq org-linear--list-buffer (current-buffer))
+  (org-linear--apply-faces)
   (org-linear-my-issues-mode 1)
   (with-current-buffer (org-linear--buffer)
     (add-hook 'kill-buffer-hook #'org-linear--kill-list nil t)))
+
+(defun org-linear--apply-faces ()
+  "Give each stretch of the agenda with an `org-linear-face' property that face."
+  (let ((inhibit-read-only t)
+        (pos (point-min)))
+    (while (setq pos (text-property-not-all pos (point-max) 'org-linear-face nil))
+      (let ((end (next-single-property-change pos 'org-linear-face nil (point-max))))
+        (add-face-text-property pos end (get-text-property pos 'org-linear-face))
+        (setq pos end)))))
 
 (defun org-linear--kill-list ()
   "Kill the list of your issues, if it is open."
@@ -439,9 +455,20 @@ on another issue."
   (let ((due (org-linear--planning-date "DEADLINE"))
         (project (save-excursion
                    (if (org-up-heading-safe) (org-get-heading t t t t) ""))))
-    (format "%s %-5s"
-            (string-pad project org-linear--agenda-project-width)
-            (if due (substring due 5) ""))))
+    (concat (string-pad project org-linear--agenda-project-width)
+            " "
+            (string-pad (if due (org-linear--due-label due) "") 5))))
+
+(defun org-linear--due-label (due)
+  "Return the month and day of DUE, a YYYY-MM-DD date, marked with its urgency.
+The mark is an `org-linear-face' property, since the agenda clears `face'
+on the lines it builds; `org-linear--apply-faces' turns it into a face."
+  (let ((days (- (org-time-string-to-absolute due) (org-today)))
+        (label (substring due 5)))
+    (cond ((<= days 0) (propertize label 'org-linear-face 'org-imminent-deadline))
+          ((<= days org-deadline-warning-days)
+           (propertize label 'org-linear-face 'org-upcoming-deadline))
+          (t label))))
 
 (defun org-linear--longest-project-name (buffer)
   "Return the length of the longest level-1 heading in BUFFER."

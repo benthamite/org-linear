@@ -1144,6 +1144,41 @@ Removing it ends the snooze."
         (when (get-buffer "*Org Agenda(L)*") (kill-buffer "*Org Agenda(L)*"))
         (when (get-buffer org-agenda-buffer-name) (kill-buffer org-agenda-buffer-name))))))
 
+(ert-deftest org-linear-test-my-issues-shows-dated-issues ()
+  "An overdue issue stays in the list, in the imminent face, when the agenda hides dated tasks."
+  (org-linear-test--with-board
+    (let ((yesterday (format-time-string "%Y-%m-%d" (time-add nil (days-to-time -1)))))
+      (org-linear-test--edit "i1" 'dueDate yesterday)
+      (org-linear-test--sync)
+      (unwind-protect
+          (let ((org-agenda-todo-ignore-with-date t)
+                (org-agenda-todo-ignore-deadlines 'all))
+            (org-linear-my-issues)
+            (with-current-buffer org-agenda-buffer-name
+              (goto-char (point-min))
+              (should (re-search-forward
+                       (format "\\(%s\\) +\\(?:\\[#B\\] \\)?Task one"
+                               (regexp-quote (substring yesterday 5)))
+                       nil t))
+              (should (memq 'org-imminent-deadline
+                            (ensure-list (get-text-property (match-beginning 1) 'face))))))
+        (when (get-buffer org-agenda-buffer-name)
+          (kill-buffer org-agenda-buffer-name))))))
+
+(ert-deftest org-linear-test-due-label-faces ()
+  "A due date today or past is imminent, one within the warning days upcoming."
+  (let ((org-deadline-warning-days 14)
+        (date (lambda (offset)
+                (format-time-string "%Y-%m-%d" (time-add nil (days-to-time offset))))))
+    (should (eq (get-text-property 0 'org-linear-face (org-linear--due-label (funcall date -1)))
+                'org-imminent-deadline))
+    (should (eq (get-text-property 0 'org-linear-face (org-linear--due-label (funcall date 0)))
+                'org-imminent-deadline))
+    (should (eq (get-text-property 0 'org-linear-face (org-linear--due-label (funcall date 3)))
+                'org-upcoming-deadline))
+    (should-not (get-text-property 0 'org-linear-face (org-linear--due-label (funcall date 60))))
+    (should (equal (org-linear--due-label "2026-11-10") "11-10"))))
+
 ;;;; Feedback and refreshing the list
 
 (defun org-linear-test--wait ()
