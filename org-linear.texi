@@ -305,7 +305,7 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @tab Show the sync log
 @end multitable
 
-The @samp{o} key appears only when point is on an issue in the file, the @samp{t} key only in the list of your issues, and the @samp{c} key in either. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
+Every key is always shown; @samp{o}, @samp{t} and @samp{c} act on the issue at point, in the file or in the list of your issues. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
 
 @node User options
 @chapter User options

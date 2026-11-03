@@ -403,12 +403,16 @@ lines would no longer lead to any heading."
     (kill-buffer org-linear--list-buffer)))
 
 (defun org-linear-my-issues-todo (&optional arg)
-  "Change the status of the issue at point, then rebuild the list.
-Point stays on the same line, which is now the next issue of the section.
-ARG is as in `org-agenda-todo'."
+  "Change the status of the issue at point, in the file or the list of your issues.
+In the list, rebuild it afterwards; point stays on the same line, which
+is now the next issue of the section.  ARG is as in `org-agenda-todo' or
+`org-todo'."
   (interactive "P")
-  (org-agenda-todo arg)
-  (org-agenda-redo t))
+  (if (derived-mode-p 'org-agenda-mode)
+      (progn
+        (org-agenda-todo arg)
+        (org-agenda-redo t))
+    (org-todo arg)))
 
 (defun org-linear--refresh-list-after-sync ()
   "Rebuild the list if this sync was to refresh it and brought changes."
@@ -484,11 +488,19 @@ on the lines it builds; `org-linear--apply-faces' turns it into a face."
 
 ;;;###autoload
 (defun org-linear-browse ()
-  "Open the Linear issue of the heading at point."
+  "Open the Linear issue at point, in the file or the list of your issues."
   (interactive)
-  (if-let* ((url (org-entry-get nil "LINEAR_URL")))
+  (if-let* ((url (org-linear--url-at-point)))
       (browse-url url)
     (user-error "No Linear issue at point")))
+
+(defun org-linear--url-at-point ()
+  "Return the Linear URL of the issue at point, in the file or an agenda, or nil."
+  (cond ((derived-mode-p 'org-agenda-mode)
+         (when-let* ((marker (org-get-at-bol 'org-hd-marker)))
+           (org-entry-get marker "LINEAR_URL")))
+        ((derived-mode-p 'org-mode)
+         (org-entry-get nil "LINEAR_URL"))))
 
 ;;;###autoload
 (defun org-linear-comment ()
@@ -520,32 +532,15 @@ Finish the note as usual; the next sync posts it as a comment.  Under
   ["Issues"
    ("m" "My issues" org-linear-my-issues)
    ("v" "Visit the file" org-linear-visit)
-   ("o" "Open the issue at point in Linear" org-linear-browse
-    :if org-linear--issue-at-point-p)
-   ("t" "Change the status of the issue at point" org-linear-my-issues-todo
-    :if org-linear--in-list-p)
-   ("c" "Comment on the issue at point" org-linear-comment
-    :if org-linear--commentable-p)]
+   ("o" "Open the issue at point in Linear" org-linear-browse)
+   ("t" "Change the status of the issue at point" org-linear-my-issues-todo)
+   ("c" "Comment on the issue at point" org-linear-comment)]
   ["Sync"
    ("s" "Sync now" org-linear-sync)
    ("a" org-linear-auto-sync-mode
     :description org-linear--auto-sync-description
     :transient t)
    ("l" "Show the log" org-linear-show-log)])
-
-(defun org-linear--issue-at-point-p ()
-  "Return non-nil if point is in an Org entry with a Linear issue."
-  (and (derived-mode-p 'org-mode)
-       (ignore-errors (org-entry-get nil "LINEAR_URL"))))
-
-(defun org-linear--in-list-p ()
-  "Return non-nil if the current buffer is the list of your issues."
-  (bound-and-true-p org-linear-my-issues-mode))
-
-(defun org-linear--commentable-p ()
-  "Return non-nil if there is an issue at point to comment on."
-  (or (org-linear--issue-at-point-p)
-      (and (org-linear--in-list-p) (org-get-at-bol 'org-hd-marker))))
 
 (defun org-linear--auto-sync-description ()
   "Return the menu's label for `org-linear-auto-sync-mode', with its state."

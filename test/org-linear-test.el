@@ -657,17 +657,33 @@ A string is an error message."
   "A dot in the list of your issues opens the menu."
   (should (eq (lookup-key org-linear-my-issues-mode-map ".") #'org-linear-menu)))
 
-(ert-deftest org-linear-test-menu-issue-predicate ()
-  "The open-issue key is offered only on an entry with a Linear issue."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* An issue\n:PROPERTIES:\n:LINEAR_URL: https://linear.app/x/issue/ENG-1\n:END:\n* A note\n")
-    (goto-char (point-min))
-    (should (org-linear--issue-at-point-p))
-    (goto-char (point-max))
-    (should-not (org-linear--issue-at-point-p)))
-  (with-temp-buffer
-    (should-not (org-linear--issue-at-point-p))))
+(ert-deftest org-linear-test-browse-from-file-and-list ()
+  "Opening the issue at point works in the file and in the list of your issues."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+        (org-linear-test--goto "ENG-1")
+        (org-linear-browse)
+        (should (string-match-p "ENG-1" opened))
+        (setq opened nil)
+        (unwind-protect
+            (progn
+              (org-linear-my-issues)
+              (with-current-buffer org-agenda-buffer-name
+                (goto-char (point-min))
+                (search-forward "Task one")
+                (org-linear-browse)
+                (should (string-match-p "ENG-1" opened))))
+          (when (get-buffer org-agenda-buffer-name)
+            (kill-buffer org-agenda-buffer-name)))
+        (with-temp-buffer
+          (should-error (org-linear-browse) :type 'user-error))))))
+
+(ert-deftest org-linear-test-menu-shows-every-key ()
+  "No menu key is hidden, so every command is offered wherever the menu opens."
+  (dolist (key '("m" "v" "o" "t" "c" "s" "a" "l"))
+    (should-not (plist-get (cdr (transient-get-suffix 'org-linear-menu key)) :if))))
 
 (ert-deftest org-linear-test-menu-auto-sync-label ()
   "The auto-sync label shows the mode's state."

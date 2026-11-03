@@ -220,7 +220,7 @@ Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with t
 | =a= | ~org-linear-auto-sync-mode~ | Turn syncing on save, visit and timer on/off |
 | =l= | ~org-linear-show-log~       | Show the sync log                            |
 
-The =o= key appears only when point is on an issue in the file, the =t= key only in the list of your issues, and the =c= key in either. The =a= key shows whether the mode is on, and the menu stays open after you press it.
+Every key is always shown; =o=, =t= and =c= act on the issue at point, in the file or in the list of your issues. The =a= key shows whether the mode is on, and the menu stays open after you press it.
 
 * User options
 :PROPERTIES:
