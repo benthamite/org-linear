@@ -1,4 +1,4 @@
-# `org-linear`: Two-way sync between Linear and an Org file
+# `org-linear`: Two-way sync between Linear and Org mode
 
 ## Overview
 
