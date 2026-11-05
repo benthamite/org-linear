@@ -167,7 +167,9 @@ is set.  When it is nil, `SCHEDULED' stays in the file and is never sent."
 
 (defcustom org-linear-closed-retention-days 7
   "Days a closed issue stays in the file after it was closed.
-Afterwards it moves to `org-linear-archive-file', or is deleted."
+Afterwards it moves to `org-linear-archive-file', or is deleted.  With 0,
+it leaves at the first sync that finds it closed; an issue you close in the
+file leaves right after the sync that sends the change."
   :type 'integer
   :group 'org-linear)
 
@@ -293,10 +295,11 @@ when the archive cannot take issues in this sync.")
   "Counts for the sync in progress, a plist.")
 
 (defvar org-linear--rerun nil
-  "Non-nil when Linear refused a write and the sync must run again.")
+  "Non-nil when the sync must run again.
+Linear refused a write, or a closed issue can leave once its edits are sent.")
 
 (defvar org-linear--reruns 0
-  "Consecutive reruns caused by refused writes.")
+  "Consecutive reruns of the sync.")
 
 (defconst org-linear--log-buffer "*org-linear*"
   "Buffer that records conflicts, refusals and errors.")
@@ -1268,6 +1271,8 @@ holds unsent edits, and its heading goes once it has none."
           (if org-linear-archive-file
               (org-linear--archive-heading id marker)
             (org-linear--remove-if-unchanged id marker nil)))
+        (when (and ops (org-linear--leaves-once-sent-p marker))
+          (setq org-linear--rerun t))
         ops))
      ((gethash id (plist-get index :pending))
       ;; Created by a sync whose answer was lost; its creation links it.
@@ -1282,6 +1287,12 @@ holds unsent edits, and its heading goes once it has none."
         (org-linear--forget-archived id)
         (org-linear--insert-task task converted comments projects index))
       nil))))
+
+(defun org-linear--leaves-once-sent-p (marker)
+  "Return non-nil if the issue at MARKER leaves the file once its edits are sent.
+That is a closed issue, when closed issues stay for no days."
+  (and (<= org-linear-closed-retention-days 0)
+       (member (org-with-point-at marker (org-get-todo-state)) org-done-keywords)))
 
 (defun org-linear--forget-archived (id)
   "Drop issue ID from the archived issues."
@@ -2384,6 +2395,7 @@ Open issues do, and closed ones for `org-linear-closed-retention-days'."
        (or (not (eq (alist-get 'closed task) t))
            (let ((completed (alist-get 'completed task)))
              (and completed
+                  (> org-linear-closed-retention-days 0)
                   (<= (- (time-to-days nil)
                          (time-to-days (date-to-time (concat completed "T12:00:00"))))
                       org-linear-closed-retention-days))))))

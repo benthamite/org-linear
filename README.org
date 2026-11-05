@@ -258,7 +258,7 @@ The user option ~org-linear-teams~ lists the keys of the teams whose issues the 
 ~org-linear-state-file~ holds each issue as it was at the last sync, by default =org-linear/state.eld= under =$XDG_STATE_HOME= or =~/.local/state=. Deleting it makes the next sync treat Linear's values as the starting point. The sync replaces it whole on each write, so a write cut short, by a crash or a full disk, leaves the previous state intact.
 
 #+vindex: org-linear-closed-retention-days
-~org-linear-closed-retention-days~, 7 by default, is how many days a closed issue stays in the file before it moves to the archive ([[#h:closed-issues][Closed issues]]).
+~org-linear-closed-retention-days~, 7 by default, is how many days a closed issue stays in the file before it moves to the archive ([[#h:closed-issues][Closed issues]]). With 0 it does not stay: it leaves at the first sync that finds it closed, and an issue you close in the file leaves right after the sync that sends the change.
 
 #+vindex: org-linear-pull-interval
 ~org-linear-pull-interval~, 600 by default, is the number of seconds between background syncs in ~org-linear-auto-sync-mode~.

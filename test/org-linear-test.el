@@ -1709,6 +1709,49 @@ Removing it ends the snooze."
     (let ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearUpdate")))))
       (should (equal (alist-get 'projectId input) "p-b")))))
 
+;;;; No retention
+
+(ert-deftest org-linear-test-no-retention-archives-closed-today ()
+  "With no retention, an issue closed today leaves the file at the next sync."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (should (string-match-p "Closed today" (org-linear-test--text)))
+    (let ((org-linear-closed-retention-days 0))
+      (org-linear-test--sync)
+      (should-not (string-match-p "Closed today" (org-linear-test--text)))
+      (should (string-match-p "DONE Closed today" (org-linear-test--archive-text)))
+      (org-linear-test--sync)
+      (should-not (string-match-p "Closed today" (org-linear-test--text))))))
+
+(ert-deftest org-linear-test-no-retention-archives-after-sending ()
+  "With no retention, an issue closed in the file leaves right after it is sent."
+  (org-linear-test--with-board
+    (let ((org-linear-closed-retention-days 0))
+      (org-linear-test--sync)
+      (org-linear-test--goto "ENG-1")
+      (org-todo "DONE")
+      (save-buffer)
+      (org-linear-test--sync)
+      (should (equal (alist-get 'type (alist-get 'state (gethash "i1" org-linear-test--issues)))
+                     "completed"))
+      (let ((deadline (+ (float-time) 10)))
+        (while (and (or org-linear--busy (string-match-p "Task one" (org-linear-test--text)))
+                    (< (float-time) deadline))
+          (accept-process-output nil 0.05)))
+      (should-not (string-match-p "Task one" (org-linear-test--text)))
+      (should (string-match-p "DONE .*Task one" (org-linear-test--archive-text))))))
+
+(ert-deftest org-linear-test-retention-keeps-issue-closed-in-file ()
+  "With retention, an issue closed in the file stays and no extra sync runs."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-1")
+    (org-todo "DONE")
+    (save-buffer)
+    (org-linear-test--sync)
+    (should-not org-linear--rerun)
+    (should (string-match-p "DONE .*Task one" (org-linear-test--text)))))
+
 ;;;; Plain field values
 
 (ert-deftest org-linear-test-local-view-is-plain ()
