@@ -131,11 +131,12 @@ The file's own =#+TODO= line, written from ~org-linear-file-header~ when the fil
 :CUSTOM_ID: h:working-with-issues
 :END:
 
+#+findex: org-linear-set-project
 Edit issues with ordinary Org commands, then save the file; with ~org-linear-auto-sync-mode~ the save sends your changes ([[#h:syncing][Syncing]]).
 
 - To comment on an issue, add a note with =C-c C-z= (~org-add-note~), or with =M-x org-linear-comment=, which also works from the list of your issues. Notes attached to state changes, such as the one the default header asks for when you cancel an issue, are posted too, prefixed with the new keyword.
 - To create an issue, add a level-2 heading with a TODO keyword under a project heading, with its description as the body. At the next sync it is created in Linear, in the project's team, and gets its =LINEAR_ID=. Until Linear confirms the issue, the heading holds the ID it was sent with as =LINEAR_PENDING_UUID=, so that an issue whose creation was not confirmed is found by the next sync rather than created twice.
-- To move an issue to another project, refile it under that project's heading.
+- To move an issue to another project, refile it with =C-c C-w=, or run =M-x org-linear-set-project=, which also works from the list of your issues. Either way you choose among the teams' projects only, with "No project" to clear it, and the file is saved, which sends the move. With a prefix argument, =C-c C-w= runs ~org-refile~ as usual, for instance to jump to a heading. An issue has to stay a level-2 heading: refiled by other means under another issue, it drops out of the sync, which adds it back as a second heading.
 - To assign an issue, tag it with the person's tag; an issue has one assignee, so a heading with two people's tags sends no assignee and the sync log says why.
 
 Deleting a heading does not delete the issue: it comes back at the next sync, with its description and comments. To drop an issue, cancel it.
@@ -194,7 +195,7 @@ A sync never changes the file while it has unsaved edits, and never applies chan
 
 #+findex: org-linear-my-issues
 #+vindex: org-linear-my-issues-sections
-The file holds every open issue of the teams, so it is not the place to see what is yours. =M-x org-linear-my-issues= is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of ~org-linear-my-issues-sections~. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. A due date that is today or past is shown in ~org-imminent-deadline~, and one within ~org-deadline-warning-days~ in ~org-upcoming-deadline~. Each call rebuilds the list, even with ~org-agenda-sticky~ on. From the list, =t= changes an issue's status and rebuilds the list, so the issue moves to its new section and point lands on the next one. =.= opens ~org-linear-menu~ (in place of the agenda's jump to today, which a list of issues has no use for), =TAB= shows an issue's heading in another window, =C-x C-s= saves the file, which sends your changes to Linear, and =g= refreshes the list. Issues scheduled for a later day stay out of it until that day; every other issue is shown, whatever your ~org-agenda-todo-ignore-*~ options say. Killing the buffer of the file also kills the list, whose lines would otherwise lead nowhere.
+The file holds every open issue of the teams, so it is not the place to see what is yours. =M-x org-linear-my-issues= is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of ~org-linear-my-issues-sections~. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. A due date that is today or past is shown in ~org-imminent-deadline~, and one within ~org-deadline-warning-days~ in ~org-upcoming-deadline~. Each call rebuilds the list, even with ~org-agenda-sticky~ on. From the list, =t= changes an issue's status and rebuilds the list, so the issue moves to its new section and point lands on the next one. =C-c C-w=, or any key on ~org-agenda-refile~, moves an issue to another project (~org-linear-set-project~). =.= opens ~org-linear-menu~ (in place of the agenda's jump to today, which a list of issues has no use for), =TAB= shows an issue's heading in another window, =C-x C-s= saves the file, which sends your changes to Linear, and =g= refreshes the list. Issues scheduled for a later day stay out of it until that day; every other issue is shown, whatever your ~org-agenda-todo-ignore-*~ options say. Killing the buffer of the file also kills the list, whose lines would otherwise lead nowhere.
 
 #+vindex: org-linear-my-issues-sync
 The list opens at once from the file and then syncs, unless the file has unsaved edits, and it is rebuilt with point on the same issue if the sync brings changes. Set ~org-linear-my-issues-sync~ to =nil= to turn this off.
@@ -225,13 +226,14 @@ Add ~org-linear-file~ to ~org-agenda-files~ to see your issues' deadlines with t
 | =b= | ~org-linear-browse~         | Browse the issue at point in Linear          |
 | =t= | ~org-linear-my-issues-todo~ | Change the status of the issue at point      |
 | =c= | ~org-linear-comment~        | Comment on the issue at point                |
+| =p= | ~org-linear-set-project~    | Move the issue at point to another project   |
 | =x= | ~org-linear-archive~        | Archive the closed issue at point            |
 | =X= | ~org-linear-archive-closed~ | Archive every closed issue now               |
 | =s= | ~org-linear-sync~           | Sync now                                     |
 | =a= | ~org-linear-auto-sync-mode~ | Turn syncing on save, visit and timer on/off |
 | =l= | ~org-linear-show-log~       | Show the sync log                            |
 
-Every key is always shown; =b=, =t= and =c= act on the issue at point, in the file or in the list of your issues. The =a= key shows whether the mode is on, and the menu stays open after you press it.
+Every key is always shown; =b=, =t=, =c= and =p= act on the issue at point, in the file or in the list of your issues. The =a= key shows whether the mode is on, and the menu stays open after you press it.
 
 * User options
 :PROPERTIES:

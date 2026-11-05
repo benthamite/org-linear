@@ -737,7 +737,7 @@ A string is an error message."
                    ("v" . org-linear-visit) ("b" . org-linear-browse)
                    ("s" . org-linear-sync) ("a" . org-linear-auto-sync-mode)
                    ("l" . org-linear-show-log) ("t" . org-linear-my-issues-todo)
-                   ("c" . org-linear-comment)))
+                   ("c" . org-linear-comment) ("p" . org-linear-set-project)))
     (let ((suffix (transient-get-suffix 'org-linear-menu (car entry))))
       (should (memq (cdr entry) (flatten-tree suffix)))
       (should (commandp (cdr entry))))))
@@ -754,7 +754,7 @@ A string is an error message."
                                   (symbol-file 'org-linear-sync 'defun))
                            (not (ignore-errors
                                   (catch 'found
-                                    (dolist (key '("m" "v" "b" "t" "c" "x" "X" "s" "a" "l"))
+                                    (dolist (key '("m" "v" "b" "t" "c" "p" "x" "X" "s" "a" "l"))
                                       (when (memq sym (flatten-tree
                                                        (transient-get-suffix 'org-linear-menu key)))
                                         (throw 'found t)))))))
@@ -805,7 +805,7 @@ A string is an error message."
 
 (ert-deftest org-linear-test-menu-shows-every-key ()
   "No menu key is hidden, so every command is offered wherever the menu opens."
-  (dolist (key '("m" "v" "b" "t" "c" "x" "X" "s" "a" "l"))
+  (dolist (key '("m" "v" "b" "t" "c" "p" "x" "X" "s" "a" "l"))
     (should-not (plist-get (cdr (transient-get-suffix 'org-linear-menu key)) :if))))
 
 (ert-deftest org-linear-test-menu-auto-sync-label ()
@@ -1521,6 +1521,218 @@ Removing it ends the snooze."
         (should (equal (alist-get 'type (alist-get 'state issue)) "canceled"))
         (should (seq-find (lambda (c) (string-match-p "A duplicate" (alist-get 'body c)))
                           (alist-get 'nodes (alist-get 'comments issue))))))))
+
+;;;; Setting the project
+
+(defvar org-linear-test--offered nil
+  "The names the last project prompt offered.")
+
+(defmacro org-linear-test--answering-project (name &rest body)
+  "Run BODY with the project prompt answered by NAME."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'completing-read)
+              (lambda (_prompt collection &rest _)
+                (setq org-linear-test--offered (mapcar #'car collection))
+                ,name)))
+     ,@body))
+
+(defmacro org-linear-test--in-file-at (regexp &rest body)
+  "Run BODY in the file with point on the first match of REGEXP."
+  (declare (indent 1))
+  `(with-current-buffer (find-buffer-visiting org-linear-file)
+     (goto-char (point-min))
+     (re-search-forward ,regexp)
+     ,@body))
+
+(ert-deftest org-linear-test-set-project-moves-saves-and-sends ()
+  "Setting the project moves the heading, saves the file and sends the project."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--in-file-at "^\\*\\* .*Task one"
+      (org-linear-test--answering-project "Project B"
+        (org-linear-set-project))
+      (should-not (buffer-modified-p)))
+    (should (string-match-p "^\\* Project B\n\\(?:.*\n\\)*?\\*\\* .*Task one"
+                            (org-linear-test--text)))
+    (org-linear-test--sync)
+    (let ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearUpdate")))))
+      (should (equal (alist-get 'projectId input) "p-b")))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--writes))))
+
+(ert-deftest org-linear-test-set-project-offers-only-projects ()
+  "The prompt offers the other projects and no project, but no issues."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--in-file-at "^\\*\\* .*Task one"
+      (org-linear-test--answering-project "Project B"
+        (org-linear-set-project)))
+    (should (equal (sort (copy-sequence org-linear-test--offered) #'string<)
+                   '("No project" "Project B")))))
+
+(ert-deftest org-linear-test-set-project-offers-project-without-heading ()
+  "A project with no open issues is offered, and gets its heading when chosen."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (setq org-linear--meta
+          (plist-put org-linear--meta :projects
+                     (cons '((id . "p-c") (name . "Project C") (url . "u"))
+                           (plist-get org-linear--meta :projects))))
+    (org-linear-test--in-file-at "^\\*\\* .*Task one"
+      (org-linear-test--answering-project "Project C"
+        (org-linear-set-project)))
+    (should (member "Project C" org-linear-test--offered))
+    (should (string-match-p
+             "^\\* Project C\n:PROPERTIES:\n:LINEAR_PROJECT: p-c\n:END:\n\\*\\* .*Task one"
+             (org-linear-test--text)))))
+
+(ert-deftest org-linear-test-set-project-names-are-plain ()
+  "The names offered carry none of the buffer's text properties."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (let ((inhibit-read-only t))
+        (add-text-properties (point-min) (point-max) '(face bold)))
+      (set-buffer-modified-p nil))
+    (org-linear-test--in-file-at "^\\*\\* .*Task one"
+      (org-linear-test--answering-project "Project B"
+        (org-linear-set-project)))
+    (dolist (name org-linear-test--offered)
+      (should-not (text-properties-at 0 name)))))
+
+(ert-deftest org-linear-test-set-project-clears-the-project ()
+  "Choosing no project moves the issue to that heading and clears it in Linear."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--in-file-at "^\\*\\* .*Task one"
+      (org-linear-test--answering-project "No project"
+        (org-linear-set-project)))
+    (should (string-match-p "^\\* No project\n\\(?:.*\n\\)*?\\*\\* .*Task one"
+                            (org-linear-test--text)))
+    (org-linear-test--sync)
+    (let ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearUpdate")))))
+      (should (eq (alist-get 'projectId input) :null)))))
+
+(ert-deftest org-linear-test-set-project-from-inside-an-issue ()
+  "From a subheading of an issue, the whole issue moves."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--in-file-at "^\\*\\* .*Task one"
+      (org-end-of-subtree t t)
+      (insert "*** A subheading\n")
+      (save-buffer)
+      (forward-line -1)
+      (org-linear-test--answering-project "Project B"
+        (org-linear-set-project)))
+    (should (string-match-p
+             "^\\* Project B\n\\(?:.*\n\\)*?\\*\\* .*Task one.*\n\\(?:.*\n\\)*?\\*\\*\\* A subheading"
+             (org-linear-test--text)))))
+
+(ert-deftest org-linear-test-set-project-of-a-new-heading ()
+  "A heading not yet in Linear can move, and is created in its new project."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--in-file-at "^\\* Project A$"
+      (org-end-of-subtree t t)
+      (insert "** TRIAGE Captured just now\n")
+      (save-buffer)
+      (forward-line -1)
+      (org-linear-test--answering-project "Project B"
+        (org-linear-set-project)))
+    (org-linear-test--sync)
+    (let ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearCreate")))))
+      (should (equal (alist-get 'title input) "Captured just now"))
+      (should (equal (alist-get 'projectId input) "p-b")))))
+
+(ert-deftest org-linear-test-set-project-needs-an-issue ()
+  "Off an issue, or outside the file, nothing is asked and nothing moves."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--in-file-at "^\\* Project A$"
+      (should-error (org-linear-set-project) :type 'user-error))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* A\n** TODO B\n")
+      (should-error (org-linear-set-project) :type 'user-error))))
+
+(ert-deftest org-linear-test-set-project-empty-answer ()
+  "An empty answer moves nothing."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let ((before (org-linear-test--text)))
+      (org-linear-test--in-file-at "^\\*\\* .*Task one"
+        (org-linear-test--answering-project ""
+          (should-error (org-linear-set-project) :type 'user-error)))
+      (should (equal (org-linear-test--text) before)))))
+
+(ert-deftest org-linear-test-set-project-prefix-refiles ()
+  "With a prefix argument, the commands it replaces run."
+  (require 'org-agenda)
+  (require 'org-refile)
+  (let (called)
+    (cl-letf (((symbol-function 'org-refile)
+               (lambda (&rest _) (interactive) (setq called 'org)))
+              ((symbol-function 'org-agenda-refile)
+               (lambda (&rest _) (interactive) (setq called 'agenda))))
+      (with-temp-buffer
+        (org-mode)
+        (org-linear-set-project '(4))
+        (should (eq called 'org)))
+      (with-temp-buffer
+        (org-agenda-mode)
+        (org-linear-set-project '(4))
+        (should (eq called 'agenda))))))
+
+(ert-deftest org-linear-test-refile-keys-set-the-project ()
+  "In the file and the list, the refile commands become this one."
+  (should (eq (lookup-key org-linear-file-mode-map [remap org-refile])
+              #'org-linear-set-project))
+  (should (eq (lookup-key org-linear-my-issues-mode-map [remap org-agenda-refile])
+              #'org-linear-set-project)))
+
+(ert-deftest org-linear-test-list-set-project ()
+  "From the list, the issue moves, its line shows the project and point stays on it."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--with-list
+      (with-current-buffer org-linear--list-buffer
+        (goto-char (point-min))
+        (search-forward "Task one")
+        (org-linear-test--answering-project "Project B"
+          (org-linear-set-project))
+        (should org-linear-my-issues-mode)
+        (let ((line (buffer-substring (line-beginning-position) (line-end-position))))
+          (should (string-match-p "Task one" line))
+          (should (string-match-p "Project B" line)))))
+    (should-not (buffer-modified-p (find-buffer-visiting org-linear-file)))
+    (org-linear-test--sync)
+    (let ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearUpdate")))))
+      (should (equal (alist-get 'projectId input) "p-b")))))
+
+;;;; Plain field values
+
+(ert-deftest org-linear-test-local-view-is-plain ()
+  "Fields read from a fontified heading carry no text properties.
+They end up in the log and in the signatures of refused edits, which must
+not change with the state of fontification."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (let ((inhibit-read-only t))
+        (add-text-properties (point-min) (point-max) '(face bold)))
+      (goto-char (point-min))
+      (re-search-forward "^\\*\\* .*Task one")
+      (let ((view (org-linear--local-view (org-linear--marker))))
+        (should (plist-get view :title))
+        (should (plist-get view :todo))
+        (should (plist-get view :priority))
+        (should (plist-get view :deadline))
+        (cl-loop for (field value) on view by #'cddr
+                 do (dolist (item (if (listp value) value (list value)))
+                      (when (stringp item)
+                        (should-not (and (> (length item) 0)
+                                         (text-properties-at 0 item)
+                                         field)))))))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

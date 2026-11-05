@@ -383,18 +383,22 @@ when `org-agenda-sticky' would reuse it, and it then syncs, as
 (declare-function org-agenda-todo "org-agenda" (&optional arg))
 (declare-function org-agenda-add-note "org-agenda" (&optional arg))
 (declare-function org-agenda-redo "org-agenda" (&optional all))
+(declare-function org-agenda-refile "org-agenda" (&optional goto rfloc no-update))
+(declare-function org-refile "org-refile" (&optional arg default-buffer rfloc msg))
 
 (defvar org-linear-my-issues-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map "t" #'org-linear-my-issues-todo)
     (define-key map "." #'org-linear-menu)
+    (define-key map [remap org-agenda-refile] #'org-linear-set-project)
     map)
   "Keymap of `org-linear-my-issues-mode'.")
 
 (define-minor-mode org-linear-my-issues-mode
   "Minor mode for the list of `org-linear-my-issues'.
 Changing an issue's status rebuilds the list, so that the issue moves to
-its new section at once.  \\<org-linear-my-issues-mode-map>\\[org-linear-menu] opens `org-linear-menu'."
+its new section at once.  Refiling an issue asks only for a project, as
+`org-linear-set-project' does.  \\<org-linear-my-issues-mode-map>\\[org-linear-menu] opens `org-linear-menu'."
   :keymap org-linear-my-issues-mode-map)
 
 (defun org-linear--list-setup ()
@@ -532,6 +536,90 @@ Finish the note as usual; the next sync posts it as a comment.  Under
     (org-add-note)))
 
 ;;;###autoload
+(defun org-linear-set-project (&optional arg)
+  "Move the issue at point to a project you choose, and save the file.
+This works in the file and in the list of your issues.  Only projects are
+offered, so the issue cannot land under another issue, where the sync would
+not see it.  `org-linear-file-mode' and `org-linear-my-issues-mode' put this
+command in the place of `org-refile' and `org-agenda-refile'; with a prefix
+argument ARG, it calls those instead."
+  (interactive "P")
+  (if arg
+      (call-interactively (if (derived-mode-p 'org-agenda-mode)
+                              #'org-agenda-refile
+                            #'org-refile))
+    (let* ((marker (org-linear--issue-at-point))
+           (choice (org-linear--read-project marker)))
+      (org-linear--move-and-save marker (cdr choice))
+      (when (derived-mode-p 'org-agenda-mode)
+        (org-agenda-redo t)
+        (org-linear--goto-list-issue marker))
+      (message "Moved to %s" (car choice)))))
+
+(defun org-linear--issue-at-point ()
+  "Return a marker at the issue at point, in the file or an agenda.
+Signal an error if point is on no issue of `org-linear-file'."
+  (or (cond ((derived-mode-p 'org-agenda-mode)
+             (when-let* ((marker (org-get-at-bol 'org-hd-marker)))
+               (org-with-point-at marker (org-linear--enclosing-issue))))
+            ((derived-mode-p 'org-mode) (org-linear--enclosing-issue)))
+      (user-error "No Linear issue at point")))
+
+(defun org-linear--enclosing-issue ()
+  "Return a marker at the issue that the text at point belongs to, or nil."
+  (when (and (org-linear--file-p) (not (org-before-first-heading-p)))
+    (save-excursion
+      (org-back-to-heading t)
+      (while (and (> (org-outline-level) 2) (org-up-heading-safe)))
+      (when (and (= (org-outline-level) 2) (org-linear--issue-heading-p))
+        (org-linear--marker)))))
+
+(defun org-linear--issue-heading-p ()
+  "Return non-nil if the level-2 heading at point is an issue.
+It is if it has an ID, or if it has a keyword and its parent is a project."
+  (or (org-entry-get nil "LINEAR_UUID")
+      (and (org-get-todo-state)
+           (save-excursion (org-up-heading-safe)
+                           (org-entry-get nil "LINEAR_PROJECT")))))
+
+(defun org-linear--read-project (marker)
+  "Ask for a project for the issue at MARKER and return it as (NAME . ID).
+ID is nil for no project."
+  (let ((choices (org-linear--project-choices marker)))
+    (or (assoc (completing-read "Move to project: " choices nil t) choices)
+        (user-error "No project chosen"))))
+
+(defun org-linear--project-choices (marker)
+  "Return (NAME . ID) for each project the issue at MARKER can move to.
+These are the projects with a heading in the file, the others known from
+the last sync and no project, whose ID is nil.  Its own project is left out."
+  (with-current-buffer (marker-buffer marker)
+    (org-with-wide-buffer
+     (let ((headings (plist-get (org-linear--index) :projects))
+           (current (org-with-point-at marker (org-linear--heading-project)))
+           choices)
+       (maphash (lambda (id heading)
+                  (unless (equal id "none")
+                    (push (cons (substring-no-properties
+                                 (org-with-point-at heading (org-get-heading t t t t)))
+                                id)
+                          choices)))
+                headings)
+       (dolist (project (org-linear--projects))
+         (unless (gethash (alist-get 'id project) headings)
+           (push (cons (alist-get 'title project) (alist-get 'id project)) choices)))
+       (seq-remove (lambda (choice) (equal (cdr choice) current))
+                   (nreverse (cons (list "No project") choices)))))))
+
+(defun org-linear--move-and-save (marker project)
+  "Move the issue at MARKER to PROJECT, an ID or nil, and save its file."
+  (with-current-buffer (marker-buffer marker)
+    (org-with-wide-buffer
+     (org-linear--move-to-project marker project (org-linear--projects)
+                                  (org-linear--index)))
+    (save-buffer)))
+
+;;;###autoload
 (defun org-linear-show-log ()
   "Show the sync log."
   (interactive)
@@ -627,6 +715,7 @@ The file is saved only if it had no unsaved edits before."
     ("b" "Browse" org-linear-browse)
     ("t" "Todo" org-linear-my-issues-todo)
     ("c" "Comment" org-linear-comment)
+    ("p" "Project" org-linear-set-project)
     ("x" "Archive" org-linear-archive)
     ("X" "Archive closed" org-linear-archive-closed)]
    ["Sync"
@@ -661,13 +750,15 @@ The file is saved only if it had no unsaved edits before."
 (defvar org-linear-file-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map [remap org-archive-subtree] #'org-linear-archive)
+    (define-key map [remap org-refile] #'org-linear-set-project)
     map)
   "Keymap of `org-linear-file-mode'.")
 
 (define-minor-mode org-linear-file-mode
   "Send the file's changes to Linear whenever it is saved.
 Archiving an issue moves it to `org-linear-archive-file' and keeps it
-out of the file while it stays closed.
+out of the file while it stays closed.  Refiling an issue asks only for a
+project, as `org-linear-set-project' does.
 
 \\{org-linear-file-mode-map}"
   :lighter " Linear"
@@ -825,11 +916,15 @@ set are fetched too, so that their edits still sync."
     (org-linear--remember-tags)
     `((tasks . ,(nreverse tasks))
       (comments . ,(nreverse comments))
-      (projects . ,(mapcar (lambda (project)
-                             `((id . ,(alist-get 'id project))
-                               (title . ,(alist-get 'name project))
-                               (url . ,(alist-get 'url project))))
-                           (plist-get org-linear--meta :projects))))))
+      (projects . ,(org-linear--projects)))))
+
+(defun org-linear--projects ()
+  "Return the teams' projects from the last sync, as the sync's data holds them."
+  (mapcar (lambda (project)
+            `((id . ,(alist-get 'id project))
+              (title . ,(alist-get 'name project))
+              (url . ,(alist-get 'url project))))
+          (plist-get org-linear--meta :projects)))
 
 (defun org-linear--task (issue)
   "Return ISSUE in the shape the merge uses."
@@ -1783,8 +1878,9 @@ the description is unchanged."
   "Return the issue at MARKER as Org field values."
   (org-with-point-at marker
     (let ((start (and org-linear-start-date-label (org-linear--planning-date "SCHEDULED"))))
-      (list :title (org-get-heading t t t t)
-            :todo (org-get-todo-state)
+      (list :title (substring-no-properties (org-get-heading t t t t))
+            :todo (when-let* ((todo (org-get-todo-state)))
+                    (substring-no-properties todo))
             :priority (org-linear--heading-priority)
             :tags (org-linear--without-start-tag
                    (sort (seq-filter (lambda (tag) (member tag (org-linear--managed-tags)))
@@ -1811,7 +1907,7 @@ The heading's notes count as already sent."
     (when (and (looking-at org-complex-heading-regexp) (match-string 3))
       (let ((cookie (match-string 3)))
         (when (string-match "\\[#\\([^]]+\\)\\]" cookie)
-          (match-string 1 cookie))))))
+          (match-string-no-properties 1 cookie))))))
 
 (defun org-linear--planning-date (property)
   "Return the date of planning PROPERTY of the heading at point, or nil."
