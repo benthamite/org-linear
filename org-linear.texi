@@ -66,29 +66,29 @@ Indices
 @node Overview
 @chapter Overview
 
-@samp{org-linear.el} keeps the issues of one or more @uref{https://linear.app, Linear} teams in an Org file and syncs the two in both directions. You work on your issues with the Org commands you already use: change a TODO keyword to move an issue through its workflow, set a deadline for its due date, add a note to comment on it, refile it to move it to another project. Changes made in Linear, by you or by your colleagues, reach the file at the next sync.
+@samp{org-linear.el} keeps the issues of one or more @uref{https://linear.app, Linear} teams in an Org file and syncs the two in both directions. You work on your issues with the Org commands you already use: change a TODO keyword to move an issue through its workflow@comma{} set a deadline for its due date@comma{} add a note to comment on it@comma{} refile it to move it to another project. Changes made in Linear@comma{} by you or by your colleagues@comma{} reach the file at the next sync.
 
-Linear stays the authoritative copy and the file is a mirror. The package exists because the alternatives each give up half of that: Linear's own interface lives outside Emacs, and a one-way export cannot be edited. Unlike an export, @samp{org-linear} remembers what each issue looked like at the last sync, so it can tell which side changed a field and merge the two without overwriting either.
+Linear stays the authoritative copy and the file is a mirror. The package exists because the alternatives each give up half of that: Linear's own interface lives outside Emacs@comma{} and a one-way export cannot be edited. Unlike an export@comma{} @samp{org-linear} remembers what each issue looked like at the last sync@comma{} so it can tell which side changed a field and merge the two without overwriting either.
 
-The package talks to Linear's GraphQL API through @samp{curl} and converts descriptions and comments between Markdown and Org with @uref{https://pandoc.org, pandoc}. Both run as subprocesses, so Emacs never waits on the network.
+The package talks to Linear's GraphQL API through @samp{curl} and converts descriptions and comments between Markdown and Org with @uref{https://pandoc.org, pandoc}. Both run as subprocesses@comma{} so Emacs never waits on the network.
 
 Its capabilities fall into four groups:
 
 @itemize
 @item
-The file: how issues, projects and their fields appear in Org (@ref{The file}).
+The file: how issues@comma{} projects and their fields appear in Org (@ref{The file, , The file}).
 @item
-Syncing: when a sync runs, how it merges, and what happens on conflicts (@ref{Syncing}).
+Syncing: when a sync runs@comma{} how it merges@comma{} and what happens on conflicts (@ref{Syncing, , Syncing}).
 @item
-Setup: the API key, the teams and the mappings (@ref{User options}).
+Setup: the API key@comma{} the teams and the mappings (@ref{User options, , User options}).
 @item
-The agenda: a single command that lists your open issues, and your deadlines among your other tasks (@ref{The agenda}).
+The agenda: a single command that lists your open issues@comma{} and your deadlines among your other tasks (@ref{The agenda, , The agenda}).
 @end itemize
 
 @node Installation
 @chapter Installation
 
-@samp{org-linear} requires Emacs 29.1 or later, Org 9.7 or later, and the @samp{curl} and @samp{pandoc} programs on your @samp{exec-path}.
+@samp{org-linear} requires Emacs 29.1 or later@comma{} Org 9.7 or later@comma{} and the @samp{curl} and @samp{pandoc} programs on your @samp{exec-path}.
 
 With Elpaca:
 
@@ -112,12 +112,12 @@ With Emacs's built-in @samp{package-vc} (Emacs 30 or later):
   (org-linear-auto-sync-mode))
 @end lisp
 
-Then create a personal API key in Linear (Settings, Security & access, Personal API keys), give it access to the teams you mirror, and make it available to the package (@ref{The API key}).
+Then create a personal API key in Linear (Settings@comma{} Security & access@comma{} Personal API keys)@comma{} give it access to the teams you mirror@comma{} and make it available to the package (@ref{The API key, , The API key}).
 
 @node The file
 @chapter The file
 
-The file is @code{org-linear-file}. When it does not exist, the first sync creates it with @code{org-linear-file-header} and fills it. Each project is a level-1 heading with a @samp{LINEAR_PROJECT} property, and each issue a level-2 heading under its project. Issues without a project go under a heading named ``No project''.
+The file is @code{org-linear-file}. When it does not exist@comma{} the first sync creates it with @code{org-linear-file-header} and fills it. Each project is a level-1 heading with a @samp{LINEAR_PROJECT} property@comma{} and each issue a level-2 heading under its project. Issues without a project go under a heading named ``No project''.
 
 @example
 * Website
@@ -154,7 +154,7 @@ The form rejects valid email addresses with a plus sign.
 @item Title
 @tab The heading's title
 @item Workflow state
-@tab TODO keyword (@ref{Workflow states and keywords})
+@tab TODO keyword (@ref{Workflow states and keywords, , Workflow states and keywords})
 @item Priority
 @tab Priority cookie (@code{org-linear-priorities})
 @item Assignee
@@ -166,52 +166,52 @@ The form rejects valid email addresses with a plus sign.
 @item Project
 @tab The level-1 heading the issue sits under
 @item Description
-@tab The heading's body, converted from and to Markdown by pandoc
+@tab The heading's body@comma{} converted from and to Markdown by pandoc
 @item Comments
 @tab Notes in the log drawer
 @end multitable
 
-The identifier, the issue's internal ID and its URL are kept in the @samp{LINEAR_ID}, @samp{LINEAR_UUID} and @samp{LINEAR_URL} properties. The sync maintains them; do not edit them.
+The identifier@comma{} the issue's internal ID and its URL are kept in the @samp{LINEAR_ID}@comma{} @samp{LINEAR_UUID} and @samp{LINEAR_URL} properties. The sync maintains them; do not edit them.
 
-Tags that name neither a team member nor a label are yours: the sync leaves them alone and never sends them. A label's tag is its name with every character Org does not allow in tags replaced by @samp{_}, so the label @samp{requested-by:peter} becomes the tag @samp{requested_by_peter}. A tag you add sends the label of that name that the issue's team can use; if several can, it is logged and not sent.
+Tags that name neither a team member nor a label are yours: the sync leaves them alone and never sends them. A label's tag is its name with every character Org does not allow in tags replaced by @samp{_}@comma{} so the label @samp{requested-by:peter} becomes the tag @samp{requested_by_peter}. A tag you add sends the label of that name that the issue's team can use; if several can@comma{} it is logged and not sent.
 
-Linear issues have no start date, so by default @samp{SCHEDULED} is not synced: use it freely to defer an issue in your own agenda.
+Linear issues have no start date@comma{} so by default @samp{SCHEDULED} is not synced: use it freely to defer an issue in your own agenda.
 
 @vindex org-linear-start-date-label
-A team can stand in for a start date with a @samp{Start: YYYY-MM-DD} first line in the description and a label. Set @code{org-linear-start-date-label} to that label's name, such as @samp{"deferred"}, and @samp{SCHEDULED} syncs both ways with the two of them. A date in the file then shows as @samp{SCHEDULED} alone: the line leaves the body, and the label's tag leaves the tags. Setting, moving or removing @samp{SCHEDULED} rewrites the line and sets or removes the label on Linear, and for an issue in triage it also snoozes the issue until the start of that date in your time zone, or ends the snooze. Nothing is written when you turn the option on, unless a synced heading already has a @samp{SCHEDULED} of its own: that date is sent.
+A team can stand in for a start date with a @samp{Start: YYYY-MM-DD} first line in the description and a label. Set @code{org-linear-start-date-label} to that label's name@comma{} such as @samp{"deferred"}@comma{} and @samp{SCHEDULED} syncs both ways with the two of them. A date in the file then shows as @samp{SCHEDULED} alone: the line leaves the body@comma{} and the label's tag leaves the tags. Setting@comma{} moving or removing @samp{SCHEDULED} rewrites the line and sets or removes the label on Linear@comma{} and for an issue in triage it also snoozes the issue until the start of that date in your time zone@comma{} or ends the snooze. Nothing is written when you turn the option on@comma{} unless a synced heading already has a @samp{SCHEDULED} of its own: that date is sent.
 
-Every @samp{SCHEDULED} on a synced issue is then visible to your team, and the label stays after the date passes, until someone removes the date. A Linear view that hides the label keeps hiding the issue until then.
+Every @samp{SCHEDULED} on a synced issue is then visible to your team@comma{} and the label stays after the date passes@comma{} until someone removes the date. A Linear view that hides the label keeps hiding the issue until then.
 
 @node Workflow states and keywords
 @section Workflow states and keywords
 
-Each issue's workflow state becomes a TODO keyword. By default the keyword depends only on the state's type (@code{org-linear-type-keywords}): triage issues are @samp{TRIAGE}, backlog issues @samp{BACKLOG}, unstarted ones @samp{TODO}, started ones @samp{DOING}, completed ones @samp{DONE}, and canceled or duplicate ones @samp{CANCELLED}. @code{org-linear-state-keywords} gives individual states keywords of their own, for instance a @samp{WAITING} keyword for a state named ``Waiting''.
+Each issue's workflow state becomes a TODO keyword. By default the keyword depends only on the state's type (@code{org-linear-type-keywords}): triage issues are @samp{TRIAGE}@comma{} backlog issues @samp{BACKLOG}@comma{} unstarted ones @samp{TODO}@comma{} started ones @samp{DOING}@comma{} completed ones @samp{DONE}@comma{} and canceled or duplicate ones @samp{CANCELLED}. @code{org-linear-state-keywords} gives individual states keywords of their own@comma{} for instance a @samp{WAITING} keyword for a state named ``Waiting''.
 
-When you change a keyword in the file, the sync sends it as the state @code{org-linear-keyword-states} names for it, or else as the first state of the issue's team that maps to that keyword, in Linear's order of state types and positions.
+When you change a keyword in the file@comma{} the sync sends it as the state @code{org-linear-keyword-states} names for it@comma{} or else as the first state of the issue's team that maps to that keyword@comma{} in Linear's order of state types and positions.
 
-The file's own @samp{#+TODO} line, written from @code{org-linear-file-header} when the file is created, must list every keyword these options can produce. The default header marks @samp{CANCELLED} with @samp{@@}, so Org asks for a note when you cancel an issue; the sync posts that note as a comment, which records why the issue was dropped.
+The file's own @samp{#+TODO} line@comma{} written from @code{org-linear-file-header} when the file is created@comma{} must list every keyword these options can produce. The default header marks @samp{CANCELLED} with @samp{@@}@comma{} so Org asks for a note when you cancel an issue; the sync posts that note as a comment@comma{} which records why the issue was dropped.
 
 @node Working with issues
 @section Working with issues
 
 @findex org-linear-set-project
-Edit issues with ordinary Org commands, then save the file; with @code{org-linear-auto-sync-mode} the save sends your changes (@ref{Syncing}).
+Edit issues with ordinary Org commands@comma{} then save the file; with @code{org-linear-auto-sync-mode} the save sends your changes (@ref{Syncing, , Syncing}).
 
 @itemize
 @item
-To comment on an issue, add a note with @samp{C-c C-z} (@code{org-add-note}), or with @samp{M-x org-linear-comment}, which also works from the list of your issues. Notes attached to state changes, such as the one the default header asks for when you cancel an issue, are posted too, prefixed with the new keyword.
+To comment on an issue@comma{} add a note with @samp{C-c C-z} (@code{org-add-note})@comma{} or with @samp{M-x org-linear-comment}@comma{} which also works from the list of your issues. Notes attached to state changes@comma{} such as the one the default header asks for when you cancel an issue@comma{} are posted too@comma{} prefixed with the new keyword.
 @item
-To create an issue, add a level-2 heading with a TODO keyword under a project heading, with its description as the body. At the next sync it is created in Linear, in the project's team, and gets its @samp{LINEAR_ID}. Until Linear confirms the issue, the heading holds the ID it was sent with as @samp{LINEAR_PENDING_UUID}, so that an issue whose creation was not confirmed is found by the next sync rather than created twice.
+To create an issue@comma{} add a level-2 heading with a TODO keyword under a project heading@comma{} with its description as the body. At the next sync it is created in Linear@comma{} in the project's team@comma{} and gets its @samp{LINEAR_ID}. Until Linear confirms the issue@comma{} the heading holds the ID it was sent with as @samp{LINEAR_PENDING_UUID}@comma{} so that an issue whose creation was not confirmed is found by the next sync rather than created twice.
 @item
-To move an issue to another project, refile it with @samp{C-c C-w}, or run @samp{M-x org-linear-set-project}, which also works from the list of your issues. Either way you choose among the teams' projects only, with ``No project'' to clear it, and the file is saved, which sends the move. With a prefix argument, @samp{C-c C-w} runs @code{org-refile} as usual, for instance to jump to a heading. An issue has to stay a level-2 heading: refiled by other means under another issue, it drops out of the sync, which adds it back as a second heading.
+To move an issue to another project@comma{} refile it with @samp{C-c C-w}@comma{} or run @samp{M-x org-linear-set-project}@comma{} which also works from the list of your issues. Either way you choose among the teams' projects only@comma{} with ``No project'' to clear it@comma{} and the file is saved@comma{} which sends the move. With a prefix argument@comma{} @samp{C-c C-w} runs @code{org-refile} as usual@comma{} for instance to jump to a heading. An issue has to stay a level-2 heading: refiled by other means under another issue@comma{} it drops out of the sync@comma{} which adds it back as a second heading.
 @item
-To assign an issue, tag it with the person's tag; an issue has one assignee, so a heading with two people's tags sends no assignee and the sync log says why.
+To assign an issue@comma{} tag it with the person's tag; an issue has one assignee@comma{} so a heading with two people's tags sends no assignee and the sync log says why.
 @end itemize
 
-Deleting a heading does not delete the issue: it comes back at the next sync, with its description and comments. To drop an issue, cancel it.
+Deleting a heading does not delete the issue: it comes back at the next sync@comma{} with its description and comments. To drop an issue@comma{} cancel it.
 
 @findex org-linear-browse
-@samp{M-x org-linear-browse} browses the issue at point in Linear, in the file or the list of your issues.
+@samp{M-x org-linear-browse} browses the issue at point in Linear@comma{} in the file or the list of your issues.
 
 @findex org-linear-visit
 @samp{M-x org-linear-visit} visits @code{org-linear-file}.
@@ -219,24 +219,24 @@ Deleting a heading does not delete the issue: it comes back at the next sync, wi
 @node Closed issues
 @section Closed issues
 
-The file holds every open issue of the teams and the issues closed in the last @code{org-linear-closed-retention-days} days. Older closed issues leave the file at the next sync, unless their heading holds unsent edits or notes; such a heading stays, keeps syncing its edits, and leaves once it has nothing unsent.
+The file holds every open issue of the teams and the issues closed in the last @code{org-linear-closed-retention-days} days. Older closed issues leave the file at the next sync@comma{} unless their heading holds unsent edits or notes; such a heading stays@comma{} keeps syncing its edits@comma{} and leaves once it has nothing unsent.
 
 @vindex org-linear-archive-file
-An issue that leaves moves to the archive file named by @code{org-linear-archive-file}, under a heading named after its project, with the properties Org's archiving adds (@samp{ARCHIVE_TIME}, @samp{ARCHIVE_OLPATH} and the like). Your subheadings and notes go with it. By default the archive is @samp{linear-archive.org} next to @samp{linear.org}: a @samp{%s} in the option stands for the name of @code{org-linear-file} without its directory and extension, and a relative name is relative to that file's directory. The sync creates the archive with the file's @samp{#+TODO} and @samp{#+PRIORITIES} lines and saves it before the file. While the archive's buffer has unsaved edits, or the archive changed on disk, closed issues stay in the file and the sync log says why; they move at the first sync after you save or revert it. Neither the kill ring nor the clipboard is touched.
+An issue that leaves moves to the archive file named by @code{org-linear-archive-file}@comma{} under a heading named after its project@comma{} with the properties Org's archiving adds (@samp{ARCHIVE_TIME}@comma{} @samp{ARCHIVE_OLPATH} and the like). Your subheadings and notes go with it. By default the archive is @samp{linear-archive.org} next to @samp{linear.org}: a @samp{%s} in the option stands for the name of @code{org-linear-file} without its directory and extension@comma{} and a relative name is relative to that file's directory. The sync creates the archive with the file's @samp{#+TODO} and @samp{#+PRIORITIES} lines and saves it before the file. While the archive's buffer has unsaved edits@comma{} or the archive changed on disk@comma{} closed issues stay in the file and the sync log says why; they move at the first sync after you save or revert it. Neither the kill ring nor the clipboard is touched.
 
 @findex org-linear-archive-closed
 @findex org-linear-archive
-You need not wait for the retention period to end. @samp{M-x org-linear-archive-closed} archives every closed issue in the file at once, and @samp{M-x org-linear-archive} the one at point; in the file, under @code{org-linear-auto-sync-mode}, it replaces @code{org-archive-subtree} (@samp{C-c C-x C-s}), which it calls for a heading that is not an issue. Either way the sync remembers the issue and leaves it out of the file while it stays closed; if someone reopens it in Linear, it comes back. Neither archives an open issue, which the next sync would bring back, nor one whose heading holds edits or notes not yet in Linear: sync first. They save the archive and the sync state, and the file too unless it had unsaved edits of yours.
+You need not wait for the retention period to end. @samp{M-x org-linear-archive-closed} archives every closed issue in the file at once@comma{} and @samp{M-x org-linear-archive} the one at point; in the file@comma{} under @code{org-linear-auto-sync-mode}@comma{} it replaces @code{org-archive-subtree} (@samp{C-c C-x C-s})@comma{} which it calls for a heading that is not an issue. Either way the sync remembers the issue and leaves it out of the file while it stays closed; if someone reopens it in Linear@comma{} it comes back. Neither archives an open issue@comma{} which the next sync would bring back@comma{} nor one whose heading holds edits or notes not yet in Linear: sync first. They save the archive and the sync state@comma{} and the file too unless it had unsaved edits of yours.
 
-Set @code{org-linear-archive-file} to @samp{nil} to delete closed issues instead. A heading with subheadings of your own then stays in the file for good, and the sync log says so.
+Set @code{org-linear-archive-file} to @samp{nil} to delete closed issues instead. A heading with subheadings of your own then stays in the file for good@comma{} and the sync log says so.
 
 @node Syncing
 @chapter Syncing
 
 @findex org-linear-sync
-@samp{M-x org-linear-sync} saves the file, fetches the teams' issues, merges them with the file and sends the file's changes to Linear. It returns at once; the work runs in the background and a message reports when it starts and how it ended. A background sync reports only changes, so it stays out of your echo area. The first sync converts every description and comment, so it can take a few minutes; later ones convert only what changed.
+@samp{M-x org-linear-sync} saves the file@comma{} fetches the teams' issues@comma{} merges them with the file and sends the file's changes to Linear. It returns at once; the work runs in the background and a message reports when it starts and how it ended. A background sync reports only changes@comma{} so it stays out of your echo area. The first sync converts every description and comment@comma{} so it can take a few minutes; later ones convert only what changed.
 
-The merge is three-way. For each field the sync compares the file and Linear with the issue as it was at the last sync, kept in @code{org-linear-state-file}:
+The merge is three-way. For each field the sync compares the file and Linear with the issue as it was at the last sync@comma{} kept in @code{org-linear-state-file}:
 
 @itemize
 @item
@@ -244,36 +244,36 @@ A field changed only in Linear is updated in the file.
 @item
 A field changed only in the file is sent to Linear.
 @item
-When both sides changed a field, Linear's value wins, and yours is recorded in the sync log.
+When both sides changed a field@comma{} Linear's value wins@comma{} and yours is recorded in the sync log.
 @end itemize
 
-Before each write the sync checks when the issue was last edited. If someone changed it in Linear after the sync read it, the write is refused and the issue is merged again at the next sync, so a change made in Linear is never overwritten. A write Linear rejects, for instance for an invalid value, is logged and not retried until you change what was sent; the sync's other writes still go through. A write that fails before Linear judges it, through a timeout, a server error or a rate limit, ends the sync instead, and the next sync tries it again.
+Before each write the sync checks when the issue was last edited. If someone changed it in Linear after the sync read it@comma{} the write is refused and the issue is merged again at the next sync@comma{} so a change made in Linear is never overwritten. A write Linear rejects@comma{} for instance for an invalid value@comma{} is logged and not retried until you change what was sent; the sync's other writes still go through. A write that fails before Linear judges it@comma{} through a timeout@comma{} a server error or a rate limit@comma{} ends the sync instead@comma{} and the next sync tries it again.
 
-A sync never changes the file while it has unsaved edits, and never applies changes if the file changed on disk since you visited it. The changes a sync makes clear the buffer's undo history, since undoing them would send a reversal of your colleagues' changes to Linear.
+A sync never changes the file while it has unsaved edits@comma{} and never applies changes if the file changed on disk since you visited it. The changes a sync makes clear the buffer's undo history@comma{} since undoing them would send a reversal of your colleagues' changes to Linear.
 
 @findex org-linear-auto-sync-mode
 @findex org-linear-file-mode
-@code{org-linear-auto-sync-mode} is a global minor mode that syncs whenever you save or visit the file, and every @code{org-linear-pull-interval} seconds while the file has no unsaved edits. In the file's buffer it turns on @code{org-linear-file-mode}, which runs a sync after each save.
+@code{org-linear-auto-sync-mode} is a global minor mode that syncs whenever you save or visit the file@comma{} and every @code{org-linear-pull-interval} seconds while the file has no unsaved edits. In the file's buffer it turns on @code{org-linear-file-mode}@comma{} which runs a sync after each save.
 
 @findex org-linear-show-log
-@samp{M-x org-linear-show-log} shows the sync log: conflicts, refused and rejected writes, issues not created, and errors. When a sync fails, its message points there.
+@samp{M-x org-linear-show-log} shows the sync log: conflicts@comma{} refused and rejected writes@comma{} issues not created@comma{} and errors. When a sync fails@comma{} its message points there.
 
 @node The agenda
 @chapter The agenda
 
 @findex org-linear-my-issues
 @vindex org-linear-my-issues-sections
-The file holds every open issue of the teams, so it is not the place to see what is yours. @samp{M-x org-linear-my-issues} is: it opens an agenda of your open issues, with each one's project (in a column as wide as the longest project name) and due month and day, grouped into the sections of @code{org-linear-my-issues-sections}. By default those are triage, in progress, waiting and to do; a section whose keyword the file does not define is left out, and backlog issues are not shown. A due date that is today or past is shown in @code{org-imminent-deadline}, and one within @code{org-deadline-warning-days} in @code{org-upcoming-deadline}. Each call rebuilds the list, even with @code{org-agenda-sticky} on. From the list, @samp{t} changes an issue's status and rebuilds the list, so the issue moves to its new section and point lands on the next one. @samp{C-c C-w}, or any key on @code{org-agenda-refile}, moves an issue to another project (@code{org-linear-set-project}). @samp{.} opens @code{org-linear-menu} (in place of the agenda's jump to today, which a list of issues has no use for), @samp{TAB} shows an issue's heading in another window, @samp{C-x C-s} saves the file, which sends your changes to Linear, and @samp{g} refreshes the list. Issues scheduled for a later day stay out of it until that day; every other issue is shown, whatever your @code{org-agenda-todo-ignore-*} options say. Killing the buffer of the file also kills the list, whose lines would otherwise lead nowhere.
+The file holds every open issue of the teams@comma{} so it is not the place to see what is yours. @samp{M-x org-linear-my-issues} is: it opens an agenda of your open issues@comma{} with each one's project (in a column as wide as the longest project name) and due month and day@comma{} grouped into the sections of @code{org-linear-my-issues-sections}. By default those are triage@comma{} in progress@comma{} waiting and to do; a section whose keyword the file does not define is left out@comma{} and backlog issues are not shown. A due date that is today or past is shown in @code{org-imminent-deadline}@comma{} and one within @code{org-deadline-warning-days} in @code{org-upcoming-deadline}. Each call rebuilds the list@comma{} even with @code{org-agenda-sticky} on. From the list@comma{} @samp{t} changes an issue's status and rebuilds the list@comma{} so the issue moves to its new section and point lands on the next one. @samp{C-c C-w}@comma{} or any key on @code{org-agenda-refile}@comma{} moves an issue to another project (@code{org-linear-set-project}). @samp{.} opens @code{org-linear-menu} (in place of the agenda's jump to today@comma{} which a list of issues has no use for)@comma{} @samp{TAB} shows an issue's heading in another window@comma{} @samp{C-x C-s} saves the file@comma{} which sends your changes to Linear@comma{} and @samp{g} refreshes the list. Issues scheduled for a later day stay out of it until that day; every other issue is shown@comma{} whatever your @code{org-agenda-todo-ignore-*} options say. Killing the buffer of the file also kills the list@comma{} whose lines would otherwise lead nowhere.
 
 @vindex org-linear-my-issues-sync
-The list opens at once from the file and then syncs, unless the file has unsaved edits, and it is rebuilt with point on the same issue if the sync brings changes. Set @code{org-linear-my-issues-sync} to @samp{nil} to turn this off.
+The list opens at once from the file and then syncs@comma{} unless the file has unsaved edits@comma{} and it is rebuilt with point on the same issue if the sync brings changes. Set @code{org-linear-my-issues-sync} to @samp{nil} to turn this off.
 
 Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadlines with the rest of your tasks.
 
 @findex org-linear-agenda-skip
 @vindex org-linear-hide-others-in-agenda
 @vindex org-linear-agenda-keep-tags
-@code{org-linear-agenda-skip} hides issues assigned to someone else. Set it as @code{org-agenda-skip-function-global} to apply it to every agenda view; issues with no assignee and issues assigned to you stay. So do issues with a tag in @code{org-linear-agenda-keep-tags}, @samp{nil} by default, which suits a team that labels work it shares, for instance with @samp{joint}. @code{org-linear-hide-others-in-agenda}, @samp{t} by default, turns the filter off without removing it.
+@code{org-linear-agenda-skip} hides issues assigned to someone else. Set it as @code{org-agenda-skip-function-global} to apply it to every agenda view; issues with no assignee and issues assigned to you stay. So do issues with a tag in @code{org-linear-agenda-keep-tags}@comma{} @samp{nil} by default@comma{} which suits a team that labels work it shares@comma{} for instance with @samp{joint}. @code{org-linear-hide-others-in-agenda}@comma{} @samp{t} by default@comma{} turns the filter off without removing it.
 
 @lisp
 (setq org-agenda-skip-function-global #'org-linear-agenda-skip)
@@ -283,7 +283,7 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @chapter Transient menu
 
 @findex org-linear-menu
-@samp{M-x org-linear-menu} gathers the package's commands in a transient menu. In the list of your issues, @samp{.} opens it; elsewhere the package binds it to no key, so bind it yourself if you use it often.
+@samp{M-x org-linear-menu} gathers the package's commands in a transient menu. In the list of your issues@comma{} @samp{.} opens it; elsewhere the package binds it to no key@comma{} so bind it yourself if you use it often.
 
 @multitable {aaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Key
@@ -318,13 +318,13 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @tab Sync now
 @item @samp{a}
 @tab @code{org-linear-auto-sync-mode}
-@tab Turn syncing on save, visit and timer on/off
+@tab Turn syncing on save@comma{} visit and timer on/off
 @item @samp{l}
 @tab @code{org-linear-show-log}
 @tab Show the sync log
 @end multitable
 
-Every key is always shown; @samp{b}, @samp{t}, @samp{c} and @samp{p} act on the issue at point, in the file or in the list of your issues. The @samp{a} key shows whether the mode is on, and the menu stays open after you press it.
+Every key is always shown; @samp{b}@comma{} @samp{t}@comma{} @samp{c} and @samp{p} act on the issue at point@comma{} in the file or in the list of your issues. The @samp{a} key shows whether the mode is on@comma{} and the menu stays open after you press it.
 
 @node User options
 @chapter User options
@@ -340,22 +340,22 @@ Every key is always shown; @samp{b}, @samp{t}, @samp{c} and @samp{p} act on the 
 @section Teams and file
 
 @vindex org-linear-teams
-The user option @code{org-linear-teams} lists the keys of the teams whose issues the file mirrors, such as @samp{"ENG"}. It is @samp{nil} by default, and a sync refuses to run until you set it.
+The user option @code{org-linear-teams} lists the keys of the teams whose issues the file mirrors@comma{} such as @samp{"ENG"}. It is @samp{nil} by default@comma{} and a sync refuses to run until you set it.
 
 @vindex org-linear-file
-@code{org-linear-file} is the mirrored Org file, by default @samp{linear.org} in @code{org-directory}.
+@code{org-linear-file} is the mirrored Org file@comma{} by default @samp{linear.org} in @code{org-directory}.
 
 @vindex org-linear-file-header
-@code{org-linear-file-header} is the text a new file starts with. Its @samp{#+TODO} line must cover the keywords of @ref{Workflow states and keywords}, and its @samp{#+PRIORITIES} line the cookies of @code{org-linear-priorities}. Notes must go into a drawer, or they would count as part of the description: the default header's @samp{logdrawer} startup option sees to that, and you may drop it if your @code{org-log-into-drawer} is already set. Change the header before the first sync; afterwards, edit the file's header directly.
+@code{org-linear-file-header} is the text a new file starts with. Its @samp{#+TODO} line must cover the keywords of @ref{Workflow states and keywords, , Workflow states and keywords}@comma{} and its @samp{#+PRIORITIES} line the cookies of @code{org-linear-priorities}. Notes must go into a drawer@comma{} or they would count as part of the description: the default header's @samp{logdrawer} startup option sees to that@comma{} and you may drop it if your @code{org-log-into-drawer} is already set. Change the header before the first sync; afterwards@comma{} edit the file's header directly.
 
 @vindex org-linear-state-file
-@code{org-linear-state-file} holds each issue as it was at the last sync, by default @samp{org-linear/state.eld} under @samp{$XDG_STATE_HOME} or @samp{~/.local/state}. Deleting it makes the next sync treat Linear's values as the starting point. The sync replaces it whole on each write, so a write cut short, by a crash or a full disk, leaves the previous state intact.
+@code{org-linear-state-file} holds each issue as it was at the last sync@comma{} by default @samp{org-linear/state.eld} under @samp{$XDG_STATE_HOME} or @samp{~/.local/state}. Deleting it makes the next sync treat Linear's values as the starting point. The sync replaces it whole on each write@comma{} so a write cut short@comma{} by a crash or a full disk@comma{} leaves the previous state intact.
 
 @vindex org-linear-closed-retention-days
-@code{org-linear-closed-retention-days}, 7 by default, is how many days a closed issue stays in the file before it moves to the archive (@ref{Closed issues}). With 0 it does not stay: it leaves at the first sync that finds it closed, and an issue you close in the file leaves right after the sync that sends the change.
+@code{org-linear-closed-retention-days}@comma{} 7 by default@comma{} is how many days a closed issue stays in the file before it moves to the archive (@ref{Closed issues, , Closed issues}). With 0 it does not stay: it leaves at the first sync that finds it closed@comma{} and an issue you close in the file leaves right after the sync that sends the change.
 
 @vindex org-linear-pull-interval
-@code{org-linear-pull-interval}, 600 by default, is the number of seconds between background syncs in @code{org-linear-auto-sync-mode}.
+@code{org-linear-pull-interval}@comma{} 600 by default@comma{} is the number of seconds between background syncs in @code{org-linear-auto-sync-mode}.
 
 @node The API key
 @section The API key
@@ -363,19 +363,19 @@ The user option @code{org-linear-teams} lists the keys of the teams whose issues
 The sync reads your Linear API key at the start of each sync and forgets it at the end.
 
 @vindex org-linear-api-key-command
-@code{org-linear-api-key-command}, a command as a list of strings, prints the key. It runs asynchronously, so it suits a password manager's command line. It takes precedence over the next option.
+@code{org-linear-api-key-command}@comma{} a command as a list of strings@comma{} prints the key. It runs asynchronously@comma{} so it suits a password manager's command line. It takes precedence over the next option.
 
 @vindex org-linear-api-key
-@code{org-linear-api-key} is the key itself or a function that returns it. When it is @samp{nil}, the default, the key is read with @samp{auth-source} for the host @samp{api.linear.app}, for instance from a line in @samp{~/.authinfo.gpg}:
+@code{org-linear-api-key} is the key itself or a function that returns it. When it is @samp{nil}@comma{} the default@comma{} the key is read with @samp{auth-source} for the host @samp{api.linear.app}@comma{} for instance from a line in @samp{~/.authinfo.gpg}:
 
 @example
 machine api.linear.app password lin_api_YOURKEY
 @end example
 
 @vindex org-linear-api-key-forget-command
-If your command caches the key, set @code{org-linear-api-key-forget-command} to a command that drops the cached copy. When Linear rejects the key, the sync runs it and retries once, so a rotated key is read afresh.
+If your command caches the key@comma{} set @code{org-linear-api-key-forget-command} to a command that drops the cached copy. When Linear rejects the key@comma{} the sync runs it and retries once@comma{} so a rotated key is read afresh.
 
-The key reaches @samp{curl} on its standard input, never on its command line, where other processes could see it.
+The key reaches @samp{curl} on its standard input@comma{} never on its command line@comma{} where other processes could see it.
 
 @node Mappings
 @section Mappings
@@ -383,7 +383,7 @@ The key reaches @samp{curl} on its standard input, never on its command line, wh
 @vindex org-linear-type-keywords
 @vindex org-linear-state-keywords
 @vindex org-linear-keyword-states
-@code{org-linear-type-keywords} maps state types to keywords, @code{org-linear-state-keywords} maps individual state names to keywords, and @code{org-linear-keyword-states} chooses which state a keyword is sent as (@ref{Workflow states and keywords}). For example, a team with a ``Waiting'' state and a ``Rejected'' state might use:
+@code{org-linear-type-keywords} maps state types to keywords@comma{} @code{org-linear-state-keywords} maps individual state names to keywords@comma{} and @code{org-linear-keyword-states} chooses which state a keyword is sent as (@ref{Workflow states and keywords, , Workflow states and keywords}). For example@comma{} a team with a ``Waiting'' state and a ``Rejected'' state might use:
 
 @lisp
 (setq org-linear-state-keywords '(("Waiting" . "WAITING"))
@@ -391,14 +391,14 @@ The key reaches @samp{curl} on its standard input, never on its command line, wh
 @end lisp
 
 @vindex org-linear-priorities
-@code{org-linear-priorities} maps Linear's priorities, 1 (urgent) to 4 (low), to Org cookies; it is @samp{A} to @samp{D} by default. Linear's ``no priority'' is no cookie. A cookie not listed is sent as the priority of the nearest listed cookie above it, so with numeric priorities you can map only some numbers:
+@code{org-linear-priorities} maps Linear's priorities@comma{} 1 (urgent) to 4 (low)@comma{} to Org cookies; it is @samp{A} to @samp{D} by default. Linear's ``no priority'' is no cookie. A cookie not listed is sent as the priority of the nearest listed cookie above it@comma{} so with numeric priorities you can map only some numbers:
 
 @lisp
 (setq org-linear-priorities '((1 . "1") (2 . "2") (3 . "4") (4 . "6")))
 @end lisp
 
 @vindex org-linear-user-tags
-@code{org-linear-user-tags} maps team members' names to tags. A member not listed gets the first word of their name in lower case, or their full name, as in ``peter@math{_hartree}'', when another member would get the same tag, so that a tag always stands for one person. Members of other teams have no tag; an issue assigned to one of them keeps that assignee, since the file cannot represent it.
+@code{org-linear-user-tags} maps team members' names to tags. A member not listed gets the first word of their name in lower case@comma{} or their full name@comma{} as in ``peter@math{_hartree}''@comma{} when another member would get the same tag@comma{} so that a tag always stands for one person. Members of other teams have no tag; an issue assigned to one of them keeps that assignee@comma{} since the file cannot represent it.
 
 @node Programs
 @section Programs
@@ -406,7 +406,7 @@ The key reaches @samp{curl} on its standard input, never on its command line, wh
 @vindex org-linear-curl-program
 @vindex org-linear-pandoc-program
 @vindex org-linear-timeout
-@code{org-linear-curl-program} and @code{org-linear-pandoc-program} name the @samp{curl} and @samp{pandoc} executables. @code{org-linear-timeout}, 60 by default, is how many seconds a request to Linear may take before it is abandoned and the sync fails.
+@code{org-linear-curl-program} and @code{org-linear-pandoc-program} name the @samp{curl} and @samp{pandoc} executables. @code{org-linear-timeout}@comma{} 60 by default@comma{} is how many seconds a request to Linear may take before it is abandoned and the sync fails.
 
 @node Limits
 @chapter Limits
@@ -417,11 +417,11 @@ Editing or deleting a note that is already in Linear is not sent; only new notes
 @item
 Comment replies are not shown.
 @item
-An issue that re-enters the file, for instance after being reopened, gets its comments again from Linear, but your old notes on it are not restored.
+An issue that re-enters the file@comma{} for instance after being reopened@comma{} gets its comments again from Linear@comma{} but your old notes on it are not restored.
 @item
-Markdown headings in a description become bold lines, since an Org heading inside an issue's body would split the issue.
+Markdown headings in a description become bold lines@comma{} since an Org heading inside an issue's body would split the issue.
 @item
-The sync reads up to 250 labels and 250 projects, and up to 100 comments per issue. A label beyond those 250 shows no tag, but editing the tags never removes it from the issue.
+The sync reads up to 250 labels and 250 projects@comma{} and up to 100 comments per issue. A label beyond those 250 shows no tag@comma{} but editing the tags never removes it from the issue.
 @end itemize
 
 @node Indices
