@@ -210,6 +210,8 @@ To assign an issue@comma{} tag it with the person's tag; an issue has one assign
 
 Deleting a heading does not delete the issue: it comes back at the next sync@comma{} with its description and comments. To drop an issue@comma{} cancel it.
 
+An issue deleted in Linear leaves the file at the next sync. If its heading holds edits@comma{} notes or subheadings not in Linear@comma{} which can no longer take them@comma{} it moves with them to the archive file (see @ref{Closed issues, , Closed issues}) and the sync log says so; with no archive file it stays in the file.
+
 @findex org-linear-browse
 @samp{M-x org-linear-browse} browses the issue at point in Linear@comma{} in the file or the list of your issues.
 

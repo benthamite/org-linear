@@ -1262,7 +1262,7 @@ holds unsent edits, and its heading goes once it has none."
       nil)
      ((eq (alist-get 'trashed task) t)
       (if marker
-          (org-linear--remove-if-unchanged id marker "was deleted in Linear")
+          (org-linear--remove-deleted id marker)
         (remhash id (org-linear--state-tasks)))
       nil)
      (marker
@@ -2232,22 +2232,41 @@ PROJECTS and INDEX locate project headings."
       (insert text)
       (set-marker marker pos))))
 
+(defun org-linear--remove-deleted (id marker)
+  "Remove the heading at MARKER of issue ID, which was deleted in Linear.
+A heading that holds nothing unsent is deleted.  One that holds edits,
+notes or subheadings not in Linear, which can no longer take them, moves
+to `org-linear-archive-file' with all of them; with no archive file it
+stays, and the sync log says so."
+  (if (or (null org-linear-archive-file)
+          (org-linear--holds-nothing-unsent-p id marker)
+          (null (org-linear--archive-buffer)))
+      (org-linear--remove-if-unchanged id marker "was deleted in Linear")
+    (org-linear--log "Archived \"%s\": it was deleted in Linear, which cannot take its edits, notes or subheadings"
+                     (org-with-point-at marker (org-get-heading t t t t)))
+    (org-linear--archive-heading id marker)))
+
+(defun org-linear--holds-nothing-unsent-p (id marker)
+  "Return non-nil if the heading at MARKER of issue ID holds nothing unsent.
+That is no edits or notes beyond the last sync and no subheadings."
+  (let ((base (gethash id (org-linear--state-tasks))))
+    (and base (org-linear--unchanged-p marker base)
+         (not (org-linear--has-children-p marker)))))
+
 (defun org-linear--remove-if-unchanged (id marker reason)
   "Delete the heading at MARKER of issue ID unless it holds anything unsent.
 A heading with unsent edits or notes, or with subheadings of its own,
 stays.  REASON, if non-nil, says why the issue leaves, for the log line
 written when the heading stays."
-  (let ((base (gethash id (org-linear--state-tasks))))
-    (if (and base (org-linear--unchanged-p marker base)
-             (not (org-linear--has-children-p marker)))
-        (progn
-          (org-with-point-at marker
-            (delete-region (point) (progn (org-end-of-subtree t t) (point))))
-          (remhash id (org-linear--state-tasks)))
-      (when reason
-        (org-linear--log "Kept \"%s\": it %s, but the heading holds edits, notes or subheadings not in Linear"
-                         (org-with-point-at marker (org-get-heading t t t t))
-                         reason)))))
+  (if (org-linear--holds-nothing-unsent-p id marker)
+      (progn
+        (org-with-point-at marker
+          (delete-region (point) (progn (org-end-of-subtree t t) (point))))
+        (remhash id (org-linear--state-tasks)))
+    (when reason
+      (org-linear--log "Kept \"%s\": it %s, but the heading holds edits, notes or subheadings not in Linear"
+                       (org-with-point-at marker (org-get-heading t t t t))
+                       reason))))
 
 (defun org-linear--archive-heading (id marker)
   "Move the heading at MARKER of issue ID to the archive.

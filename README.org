@@ -141,6 +141,8 @@ Edit issues with ordinary Org commands, then save the file; with ~org-linear-aut
 
 Deleting a heading does not delete the issue: it comes back at the next sync, with its description and comments. To drop an issue, cancel it.
 
+An issue deleted in Linear leaves the file at the next sync. If its heading holds edits, notes or subheadings not in Linear, which can no longer take them, it moves with them to the archive file (see [[#h:closed-issues][Closed issues]]) and the sync log says so; with no archive file it stays in the file.
+
 #+findex: org-linear-browse
 =M-x org-linear-browse= browses the issue at point in Linear, in the file or the list of your issues.
 

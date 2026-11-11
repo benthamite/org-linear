@@ -526,6 +526,46 @@ A string is an error message."
       (should-not (string-match-p "Joint task" (org-linear-test--text)))
       (should-not (directory-files org-linear-test--dir nil "archive")))))
 
+(defun org-linear-test--edit-keyword-of (identifier keyword)
+  "Set the TODO KEYWORD of the heading of IDENTIFIER, as an edit by the user."
+  (org-linear-test--goto identifier)
+  (org-linear-test--editing (org-todo keyword)))
+
+(ert-deftest org-linear-test-deleted-issue-deleted ()
+  "An issue deleted in Linear whose heading holds nothing unsent is deleted."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--edit "i1" 'trashed t)
+    (org-linear-test--sync)
+    (should-not (string-match-p "Task one" (org-linear-test--text)))
+    (should-not (org-linear-test--archive-text))))
+
+(ert-deftest org-linear-test-deleted-issue-with-edit-archived ()
+  "An issue deleted in Linear whose heading holds an unsent edit is archived."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (org-linear-test--edit-keyword-of "ENG-1" "DOING")
+    (org-linear-test--edit "i1" 'trashed t)
+    (org-linear-test--sync)
+    (should-not (string-match-p "Task one" (org-linear-test--text)))
+    (should (string-match-p "^\\*\\* DOING .*Task one" (org-linear-test--archive-text)))
+    (should (string-match-p "Archived \"Task one\": it was deleted in Linear"
+                            (org-linear-test--log)))
+    (org-linear-test--sync)
+    (should-not (string-match-p "Task one" (org-linear-test--text)))))
+
+(ert-deftest org-linear-test-deleted-issue-with-edit-kept-without-archive ()
+  "With no archive file, a deleted issue's heading with an unsent edit stays."
+  (org-linear-test--with-board
+    (let ((org-linear-archive-file nil))
+      (org-linear-test--sync)
+      (org-linear-test--edit-keyword-of "ENG-1" "DOING")
+      (org-linear-test--edit "i1" 'trashed t)
+      (org-linear-test--sync)
+      (should (string-match-p "^\\*\\* DOING .*Task one" (org-linear-test--text)))
+      (should (string-match-p "Kept \"Task one\": it was deleted in Linear"
+                              (org-linear-test--log))))))
+
 ;;;; Push
 
 (ert-deftest org-linear-test-local-edits-sent ()
