@@ -1,6 +1,6 @@
 # Spec: in-place sync of Org TODOs across many files
 
-Status: approved; revised after one independent review (findings 1–4 and 6 accepted as defects; finding 5 is a decision for the user). Not implemented.
+Status: approved; revised after one independent review (findings 1–4 and 6 accepted as defects; finding 5 decided by the user: trashed → cancelled). Not implemented.
 
 ## Goal
 
@@ -39,8 +39,10 @@ Author's design choices, approved with the plan:
    layout functions, and its test suite passes unchanged.
 7. The in-place sync never deletes heading text: personal notes hold more
    than the task, and Org is the primary copy.
-8. A closed issue keeps its heading (done keyword set); a trashed issue only
-   loses its `LINEAR_UUID` property. Same reason as 7.
+8. A closed issue keeps its heading (done keyword set). A trashed issue's
+   heading keeps its text, gets the cancelled keyword and loses its
+   `LINEAR_UUID`, so nothing re-creates it (user's choice after review
+   finding 5).
 9. Each Org file maps to a `file:<basename>` label, not a Linear project:
    projects in Linear need team scoping and add a second hierarchy to keep in
    sync; a label is enough to filter by source.
@@ -109,7 +111,7 @@ layout go behind a small set of layout functions:
 | Body | to next heading | to next heading of any level (children are not body) |
 | New Linear issue | insert under project | insert under inbox heading |
 | Closed issue | archive/delete heading | keep heading, set done keyword |
-| Trashed issue | delete heading | drop `LINEAR_UUID`, keep heading, log |
+| Trashed issue | delete heading | set cancelled keyword, drop `LINEAR_UUID`, keep text, log |
 | Conflict winner | Linear | Org |
 | Linked heading gone from Org | n/a | archive the issue in Linear |
 
@@ -229,6 +231,7 @@ reopens the issue with the heading's current date.
 | Exclusions beat `LINEAR_UUID` | ERT: linked heading gains an excluded tag (own and inherited), keyword, habit, file |
 | Present-but-skipped never duplicated | ERT over successive syncs: dirty file, excluded refile, archived to `_archive`, then restored |
 | Heading deleted in Org | ERT: issue archived in Linear, not reinserted |
+| Trashed in Linear | ERT: heading cancelled, text intact, not re-created next sync |
 | Creation safe across async edits | ERT: lost create reply; file edited while a create is in flight; heading retitled and refiled before relinking |
 | Cache without markers | ERT: two syncs over initially unvisited files; exclusion change invalidates cache |
 | First import resumable | ERT: interrupt mid-import, rerun, no duplicates |
