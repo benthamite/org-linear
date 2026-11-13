@@ -288,9 +288,6 @@ agenda.")
 `unknown' until a closed issue first needs it; then the buffer, or nil
 when the archive cannot take issues in this sync.")
 
-(defvar org-linear--timer nil
-  "Timer of `org-linear-auto-sync-mode'.")
-
 (defvar org-linear--stats nil
   "Counts for the sync in progress, a plist.")
 
@@ -304,15 +301,166 @@ Linear refused a write, or a closed issue can leave once its edits are sent.")
 (defconst org-linear--log-buffer "*org-linear*"
   "Buffer that records conflicts, refusals and errors.")
 
+;;;; Profiles
+
+(defcustom org-linear-profiles nil
+  "Further sync configurations, each with its own options and state.
+An alist of (NAME . OPTIONS).  NAME is a symbol.  OPTIONS is a plist
+whose keys name user options of org-linear without their prefix, so
+that `:teams' sets `org-linear-teams'.  An option a profile leaves out
+takes its global value, except `org-linear-state-file', which defaults
+to a file named after the profile beside the global one.  The global
+options make up the default profile, which syncs when `org-linear-teams'
+is set.  Each profile keeps its own sync state, log and timer, so that
+profiles can talk to different Linear workspaces."
+  :type '(alist :key-type symbol :value-type plist)
+  :group 'org-linear)
+
+(defvar org-linear--profile nil
+  "Name of the profile whose options and state are in effect, or nil.
+Nil is the default profile, whose options are the global ones.")
+
+(defvar-local org-linear--buffer-profile nil
+  "Name of the profile the current buffer belongs to, or nil for the default.")
+
+(defvar org-linear--profile-states (make-hash-table :test #'eq)
+  "Hash table from profile name to its saved state, an alist (VARIABLE . VALUE).")
+
+(defvar org-linear--timers nil
+  "Alist from profile name to the timer of `org-linear-auto-sync-mode'.")
+
+(defconst org-linear--profile-state-variables
+  '(org-linear--state org-linear--meta org-linear--api-key-cache org-linear--busy
+    org-linear--pending org-linear--saving org-linear--archive org-linear--stats
+    org-linear--rerun org-linear--reruns org-linear--announce org-linear--refresh-list
+    org-linear--list-buffer org-linear--agenda-project-width)
+  "Variables that hold the state of one profile's sync.")
+
+(defun org-linear--option-variables ()
+  "Return the user options a profile can set, and the log buffer's name."
+  (cons 'org-linear--log-buffer
+        (delq 'org-linear-profiles
+              (mapcar #'car (seq-filter (lambda (member) (eq (cadr member) 'custom-variable))
+                                        (get 'org-linear 'custom-group))))))
+
+(defvar org-linear--outer-values nil
+  "Alist of the values the profile variables had outside any profile.
+Bound while a profile other than the default is in effect, so that
+switching to another profile, or back to the default, starts from them.")
+
+(defun org-linear--call-with-profile (name function)
+  "Call FUNCTION with the options and state of profile NAME in effect.
+NAME is a symbol from `org-linear-profiles', or nil for the default
+profile.  The profile's state is saved again when FUNCTION returns or
+exits nonlocally."
+  (if (eq name org-linear--profile)
+      (funcall function)
+    (let* ((variables (append (org-linear--option-variables)
+                              org-linear--profile-state-variables))
+           (outer (or org-linear--outer-values
+                      (mapcar (lambda (variable) (cons variable (symbol-value variable)))
+                              (cons 'org-linear-profiles variables)))))
+      (cl-progv (append '(org-linear--profile org-linear--outer-values) variables)
+          (append (list name outer)
+                  (mapcar (lambda (variable) (org-linear--profile-value name variable outer))
+                          variables))
+        (unwind-protect
+            (funcall function)
+          (org-linear--store-profile-state name))))))
+
+(defmacro org-linear--with-profile (name &rest body)
+  "Run BODY with the options and state of profile NAME in effect."
+  (declare (indent 1) (debug t))
+  `(org-linear--call-with-profile ,name (lambda () ,@body)))
+
+(defun org-linear--profile-value (name variable outer)
+  "Return the value VARIABLE has in profile NAME.
+OUTER is an alist of the values outside any profile."
+  (let ((global (cdr (assq variable outer))))
+    (cond
+     ((null name) global)
+     ((memq variable org-linear--profile-state-variables)
+      (let ((saved (assq variable (gethash name org-linear--profile-states))))
+        (cond (saved (cdr saved))
+              ((memq variable '(org-linear--reruns org-linear--agenda-project-width)) 0))))
+     ((eq variable 'org-linear--log-buffer) (format "*org-linear: %s*" name))
+     (t
+      (let* ((options (cdr (org-linear--profile-entry name outer)))
+             (key (intern (concat ":" (string-remove-prefix "org-linear-"
+                                                            (symbol-name variable))))))
+        (cond ((plist-member options key) (plist-get options key))
+              ((eq variable 'org-linear-state-file)
+               (org-linear--profile-state-file name global))
+              (t global)))))))
+
+(defun org-linear--profile-entry (name outer)
+  "Return the entry of profile NAME in `org-linear-profiles' as OUTER has it.
+Signal an error if there is none."
+  (or (assq name (cdr (assq 'org-linear-profiles outer)))
+      (user-error "No profile %s in `org-linear-profiles'" name)))
+
+(defun org-linear--profile-state-file (name global)
+  "Return the default state file of profile NAME, beside GLOBAL's."
+  (expand-file-name (format "%s-%s.%s" (file-name-base global) name
+                            (or (file-name-extension global) "eld"))
+                    (file-name-directory global)))
+
+(defun org-linear--store-profile-state (name)
+  "Save the state variables of profile NAME from their current values.
+The default profile's state lives in the variables themselves, so it
+needs no saving, except when entered from another profile."
+  (let ((values (mapcar (lambda (variable) (cons variable (symbol-value variable)))
+                        org-linear--profile-state-variables)))
+    (if name
+        (puthash name values org-linear--profile-states)
+      (dolist (pair values)
+        (setf (alist-get (car pair) org-linear--outer-values) (cdr pair))))))
+
+(defun org-linear--bound (function)
+  "Return FUNCTION wrapped to run in the profile in effect now.
+Asynchronous callbacks, timers and hooks run outside any dynamic
+binding, so whatever starts them wraps them with this."
+  (let ((name org-linear--profile))
+    (lambda (&rest args)
+      (org-linear--call-with-profile name (lambda () (apply function args))))))
+
+(defun org-linear--profile-names ()
+  "Return the names of the profiles that sync, nil standing for the default.
+The default profile comes first, and syncs only when `org-linear-teams'
+is set."
+  (let ((outer (or org-linear--outer-values
+                   `((org-linear-teams . ,org-linear-teams)
+                     (org-linear-profiles . ,org-linear-profiles)))))
+    (append (and (cdr (assq 'org-linear-teams outer)) (list nil))
+            (mapcar #'car (cdr (assq 'org-linear-profiles outer))))))
+
+(defun org-linear--read-profile ()
+  "Ask for a profile and return its name, nil for the default."
+  (let* ((choices (mapcar (lambda (name) (cons (if name (symbol-name name) "default") name))
+                          (org-linear--profile-names))))
+    (cdr (assoc (completing-read "Profile: " choices nil t) choices))))
+
 ;;;; Commands
 
 ;;;###autoload
-(defun org-linear-sync (&optional announce)
+(defun org-linear-sync (&optional announce profile)
   "Sync `org-linear-file' with Linear in both directions.
 Save the file first, so that its edits are sent.  With ANNOUNCE, as when
 called interactively, report the start and the end of the sync even if
-it changes nothing; background syncs report only changes."
-  (interactive (list t))
+it changes nothing; background syncs report only changes.  PROFILE names
+the profile to sync; interactively it is the current buffer's, or the
+one you choose with a prefix argument.  Called from Lisp without it, the
+sync runs in the profile in effect."
+  (interactive (list t (if current-prefix-arg
+                           (org-linear--read-profile)
+                         (or org-linear--buffer-profile 'default))))
+  (if (and profile (not (eq profile org-linear--profile)))
+      (org-linear--with-profile (unless (eq profile 'default) profile)
+        (org-linear--sync announce))
+    (org-linear--sync announce)))
+
+(defun org-linear--sync (announce)
+  "Sync in the profile in effect; ANNOUNCE is as in `org-linear-sync'."
   (unless org-linear-teams
     (user-error "Set `org-linear-teams' to the keys of the teams to mirror"))
   (when announce
@@ -626,7 +774,8 @@ the last sync and no project, whose ID is nil.  Its own project is left out."
 (defun org-linear-show-log ()
   "Show the sync log."
   (interactive)
-  (pop-to-buffer (get-buffer-create org-linear--log-buffer)))
+  (org-linear--with-profile org-linear--buffer-profile
+    (pop-to-buffer (get-buffer-create org-linear--log-buffer))))
 
 ;;;###autoload
 (defun org-linear-visit ()
@@ -739,16 +888,21 @@ The file is saved only if it had no unsaved edits before."
   "Sync `org-linear-file' on save, on visit and every few minutes."
   :global t
   :group 'org-linear
-  (when org-linear--timer
-    (cancel-timer org-linear--timer)
-    (setq org-linear--timer nil))
+  (dolist (entry org-linear--timers)
+    (cancel-timer (cdr entry)))
+  (setq org-linear--timers nil)
   (remove-hook 'find-file-hook #'org-linear--maybe-enable-file-mode)
   (when org-linear-auto-sync-mode
     (add-hook 'find-file-hook #'org-linear--maybe-enable-file-mode)
-    (setq org-linear--timer
-          (run-with-timer 60 org-linear-pull-interval #'org-linear--timer-sync))
-    (when-let* ((buffer (find-buffer-visiting org-linear-file)))
-      (with-current-buffer buffer (org-linear-file-mode 1)))))
+    (dolist (name (org-linear--profile-names))
+      (org-linear--with-profile name
+        (push (cons name (run-with-timer 60 org-linear-pull-interval
+                                         (org-linear--bound #'org-linear--timer-sync)))
+              org-linear--timers)
+        (when-let* ((buffer (find-buffer-visiting org-linear-file)))
+          (with-current-buffer buffer
+            (setq org-linear--buffer-profile name)
+            (org-linear-file-mode 1)))))))
 
 (defvar org-linear-file-mode-map
   (let ((map (make-sparse-keymap)))
@@ -771,16 +925,20 @@ project, as `org-linear-set-project' does.
     (remove-hook 'after-save-hook #'org-linear--after-save t)))
 
 (defun org-linear--maybe-enable-file-mode ()
-  "Enable `org-linear-file-mode' in the mirrored file, and sync it."
-  (when (org-linear--file-p)
-    (org-linear-file-mode 1)
-    (unless org-linear--busy
-      (org-linear-sync))))
+  "Enable `org-linear-file-mode' in a mirrored file, and sync it."
+  (dolist (name (org-linear--profile-names))
+    (org-linear--with-profile name
+      (when (org-linear--file-p)
+        (setq org-linear--buffer-profile name)
+        (org-linear-file-mode 1)
+        (unless org-linear--busy
+          (org-linear-sync))))))
 
 (defun org-linear--after-save ()
   "Sync after the user saves the file."
-  (unless org-linear--saving
-    (run-with-idle-timer 0.5 nil #'org-linear-sync)))
+  (org-linear--with-profile org-linear--buffer-profile
+    (unless org-linear--saving
+      (run-with-idle-timer 0.5 nil (org-linear--bound #'org-linear-sync)))))
 
 (defun org-linear--timer-sync ()
   "Sync unless the file has unsaved edits, which a save will send."
@@ -1828,10 +1986,10 @@ not sent again while later edits still go through."
   (cond
    ((and org-linear--rerun (< org-linear--reruns 2))
     (cl-incf org-linear--reruns)
-    (run-with-timer 1 nil #'org-linear-sync))
+    (run-with-timer 1 nil (org-linear--bound #'org-linear-sync)))
    (t (setq org-linear--reruns 0)
       (when org-linear--pending
-        (run-with-timer 1 nil #'org-linear-sync)))))
+        (run-with-timer 1 nil (org-linear--bound #'org-linear-sync))))))
 
 (defun org-linear--fail (format-string &rest args)
   "End the sync with an error described by FORMAT-STRING and ARGS."
@@ -1844,7 +2002,7 @@ not sent again while later edits still go through."
       (setq org-linear--busy nil)
       (message "Linear sync failed: %s (M-x org-linear-show-log)" text)
       (when org-linear--pending
-        (run-with-timer 5 nil #'org-linear-sync)))))
+        (run-with-timer 5 nil (org-linear--bound #'org-linear-sync))))))
 
 (defun org-linear--report ()
   "Report the counts of the sync that ended, if anything happened."
@@ -2606,7 +2764,8 @@ remembered as refused."
   "Run COMMAND asynchronously, feeding it INPUT if non-nil.
 Call CALLBACK with the exit code, the output and the error output.  An
 error in CALLBACK ends the sync instead of leaving it running."
-  (let* ((out (generate-new-buffer " *org-linear-out*"))
+  (let* ((callback (org-linear--bound callback))
+         (out (generate-new-buffer " *org-linear-out*"))
          (err (generate-new-buffer " *org-linear-err*"))
          (proc (make-process
                 :name "org-linear"

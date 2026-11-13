@@ -336,6 +336,79 @@ A string is an error message."
   (alist-get 'input (cdr (seq-find (lambda (call) (equal (alist-get 'id (cdr call)) id))
                                    (reverse (org-linear-test--calls "OrgLinearUpdate"))))))
 
+;;;; Profiles
+
+(defmacro org-linear-test--with-profiles (&rest body)
+  "Run BODY with profiles `work' and `home' mirroring the fake board.
+Each mirrors it into its own file, and the default profile has no teams."
+  (declare (indent 0))
+  `(org-linear-test--with-board
+     (let ((org-linear-profiles
+            `((work :file ,(expand-file-name "work.org" org-linear-test--dir))
+              (home :file ,(expand-file-name "home.org" org-linear-test--dir))))
+           (org-linear--profile-states (make-hash-table :test #'eq)))
+       (cl-letf (((symbol-function 'org-linear--graphql)
+                  (lambda (query variables callback &optional errback retried)
+                    (org-linear-test--graphql query variables (org-linear--bound callback)
+                                              (and errback (org-linear--bound errback))
+                                              retried))))
+         (unwind-protect
+             (progn ,@body)
+           (dolist (name '(work home))
+             (org-linear--with-profile name
+               (when-let* ((buffer (find-buffer-visiting org-linear-file)))
+                 (with-current-buffer buffer (set-buffer-modified-p nil))
+                 (kill-buffer buffer))
+               (when (get-buffer org-linear--log-buffer)
+                 (kill-buffer org-linear--log-buffer)))))))))
+
+(defun org-linear-test--sync-profile (name)
+  "Run a sync of profile NAME and wait until it ends."
+  (org-linear-sync nil name)
+  (let ((deadline (+ (float-time) 60)))
+    (while (and (org-linear--with-profile name org-linear--busy)
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05)))
+  (should-not (org-linear--with-profile name org-linear--busy)))
+
+(ert-deftest org-linear-test-profiles-keep-separate-state ()
+  "Two profiles sync into their own files, state files and logs."
+  (org-linear-test--with-profiles
+    (org-linear-test--sync-profile 'work)
+    (should (org-linear--with-profile 'work (file-exists-p org-linear-file)))
+    (should-not (org-linear--with-profile 'home (file-exists-p org-linear-file)))
+    (should (org-linear--with-profile 'work (file-exists-p org-linear-state-file)))
+    (should-not (equal (org-linear--with-profile 'work org-linear-state-file)
+                       (org-linear--with-profile 'home org-linear-state-file)))
+    (should (org-linear--with-profile 'work (org-linear--state-tasks)))
+    (should-not (org-linear--with-profile 'home org-linear--state))
+    (should-not org-linear--state)
+    (org-linear-test--sync-profile 'home)
+    (should (org-linear--with-profile 'home (file-exists-p org-linear-file)))
+    (should-not (equal (org-linear--with-profile 'work org-linear--log-buffer)
+                       (org-linear--with-profile 'home org-linear--log-buffer)))))
+
+(ert-deftest org-linear-test-profile-option-falls-back-to-global ()
+  "A profile takes the global value of an option it leaves out."
+  (org-linear-test--with-profiles
+    (should (equal (org-linear--with-profile 'work org-linear-teams) '("ENG")))
+    (should (equal (org-linear--with-profile 'work org-linear-file)
+                   (expand-file-name "work.org" org-linear-test--dir)))
+    (should (equal org-linear-file (expand-file-name "linear.org" org-linear-test--dir)))))
+
+(ert-deftest org-linear-test-process-callback-keeps-profile ()
+  "A process started in a profile calls back in that profile."
+  (let ((org-linear-profiles '((work :teams ("W"))))
+        (org-linear--profile-states (make-hash-table :test #'eq))
+        seen)
+    (org-linear--with-profile 'work
+      (org-linear--run-process '("true") nil
+                               (lambda (&rest _) (setq seen (list org-linear--profile org-linear-teams)))))
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (null seen) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (equal seen '(work ("W"))))))
+
 ;;;; Mappings
 
 (ert-deftest org-linear-test-cookie-priority ()

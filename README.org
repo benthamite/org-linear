@@ -322,6 +322,23 @@ The key reaches =curl= on its standard input, never on its command line, where o
 #+vindex: org-linear-timeout
 ~org-linear-curl-program~ and ~org-linear-pandoc-program~ name the =curl= and =pandoc= executables. ~org-linear-timeout~, 60 by default, is how many seconds a request to Linear may take before it is abandoned and the sync fails.
 
+** Profiles
+:PROPERTIES:
+:CUSTOM_ID: h:profiles
+:END:
+
+#+vindex: org-linear-profiles
+The options above make up the default profile. ~org-linear-profiles~ adds further ones, each with its own options, sync state, log and timer, so that one Emacs can sync with several Linear workspaces. It is an alist of =(NAME . OPTIONS)=: NAME is a symbol and OPTIONS a plist whose keys are option names without the =org-linear-= prefix. An option a profile leaves out takes its global value, except ~org-linear-state-file~, which defaults to a file named after the profile beside the global one. For example:
+
+#+begin_src emacs-lisp
+(setq org-linear-profiles
+      '((personal :teams ("ME")
+                  :file "~/org/personal-linear.org"
+                  :api-key-command ("my-password-tool" "read" "linear-personal"))))
+#+end_src
+
+The default profile syncs when ~org-linear-teams~ is set; the others always do under ~org-linear-auto-sync-mode~. =M-x org-linear-sync= syncs the profile of the current buffer; with a prefix argument it asks which. ~org-linear-show-log~ shows the current buffer's profile's log, =*org-linear: NAME*= for a named profile.
+
 * Limits
 :PROPERTIES:
 :CUSTOM_ID: h:limits

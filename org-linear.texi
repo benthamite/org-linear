@@ -54,6 +54,7 @@ User options
 * The API key::
 * Mappings::
 * Programs::
+* Profiles::
 
 Indices
 
@@ -336,6 +337,7 @@ Every key is always shown; @samp{b}@comma{} @samp{t}@comma{} @samp{c} and @samp{
 * The API key::
 * Mappings::
 * Programs::
+* Profiles::
 @end menu
 
 @node Teams and file
@@ -409,6 +411,21 @@ The key reaches @samp{curl} on its standard input@comma{} never on its command l
 @vindex org-linear-pandoc-program
 @vindex org-linear-timeout
 @code{org-linear-curl-program} and @code{org-linear-pandoc-program} name the @samp{curl} and @samp{pandoc} executables. @code{org-linear-timeout}@comma{} 60 by default@comma{} is how many seconds a request to Linear may take before it is abandoned and the sync fails.
+
+@node Profiles
+@section Profiles
+
+@vindex org-linear-profiles
+The options above make up the default profile. @code{org-linear-profiles} adds further ones@comma{} each with its own options@comma{} sync state@comma{} log and timer@comma{} so that one Emacs can sync with several Linear workspaces. It is an alist of @samp{(NAME . OPTIONS)}: NAME is a symbol and OPTIONS a plist whose keys are option names without the @samp{org-linear-} prefix. An option a profile leaves out takes its global value@comma{} except @code{org-linear-state-file}@comma{} which defaults to a file named after the profile beside the global one. For example:
+
+@lisp
+(setq org-linear-profiles
+      '((personal :teams ("ME")
+                  :file "~/org/personal-linear.org"
+                  :api-key-command ("my-password-tool" "read" "linear-personal"))))
+@end lisp
+
+The default profile syncs when @code{org-linear-teams} is set; the others always do under @code{org-linear-auto-sync-mode}. @samp{M-x org-linear-sync} syncs the profile of the current buffer; with a prefix argument it asks which. @code{org-linear-show-log} shows the current buffer's profile's log@comma{} @samp{*org-linear: NAME*} for a named profile.
 
 @node Limits
 @chapter Limits
