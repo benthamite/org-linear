@@ -58,7 +58,11 @@ Author's design choices, approved with the plan:
 14. Exclusions (files, tags, keywords) are user options with no
     user-specific defaults in the package; habits are always excluded,
     since a habit's repeat history has no Linear counterpart.
-15. Out of scope for v1: sub-issues, projects, cycles, estimates, Linear
+15. A description edited in Linear whose Org body does not survive an
+    Org → Markdown → Org round trip unchanged is merged by a model, not
+    pulled as is (user's decision, after a side agent flagged lossy body
+    pulls). See §4a.
+16. Out of scope for v1: sub-issues, projects, cycles, estimates, Linear
     recurring templates.
 
 ## Current state (verified in `org-linear.el`)
@@ -164,7 +168,35 @@ Same field set as today, minus `:project`. Mapping is per profile:
 - Notes: log-drawer notes ↔ comments, as today. State-change log lines are not
   notes; this needs a test against real log drawers.
 
-### 5. Repeating TODOs
+### 4a. Merging description edits
+
+Pulling a Linear description replaces the Org body with pandoc's Markdown →
+Org conversion. That loses Org-only markup (internal and ID links,
+citations, footnotes, some blocks). So when Linear changed the description
+since the last sync:
+
+- If the current Org body survives Org → Markdown → Org unchanged, pull as
+  today.
+- Otherwise call `org-linear-merge-body-function` (new option, nil by
+  default) with the Org body, the Markdown last synced, Linear's new
+  Markdown, and a callback. It returns, asynchronously, a new Org body that
+  applies Linear's edit and keeps the Org-only markup. The user's config
+  supplies a model-backed function (gptel); the package does not depend on
+  any model client.
+- The sync accepts the result only if it converts to Markdown that matches
+  Linear's new description (whitespace-normalized). Then the body is set and
+  the base advances.
+- If the option is nil, the call fails, or the check fails, the heading is
+  left untouched, the base does not advance, the log says why, and the next
+  sync tries again. Neither side's text is overwritten meanwhile: the body
+  field is held out of the push for that issue until a merge lands or the
+  Org body is edited (then both sides changed, and the user's Org edit
+  wins under decision 3, with Linear's text kept in the log).
+- If the Org body also changed since the last sync, both sides changed:
+  decision 3 applies (Org wins, Linear's text goes to the log) and no model
+  is called.
+
+
 
 A TODO with a repeater is one issue. Completing it in Linear makes the sync
 run `org-todo` with the done keyword, so Org applies the repeat (keyword
@@ -235,6 +267,7 @@ reopens the issue with the heading's current date.
 | Creation safe across async edits | ERT: lost create reply; file edited while a create is in flight; heading retitled and refiled before relinking |
 | Cache without markers | ERT: two syncs over initially unvisited files; exclusion change invalidates cache |
 | First import resumable | ERT: interrupt mid-import, rerun, no duplicates |
+| Lossy body merge | ERT with a fake merge function: lossless body pulled directly; lossy body merged; failing check leaves Org and Linear untouched and retries; nil option logs and holds |
 | Live acceptance | preview → import one small file → import the rest, checking Linear's issue count against the preview |
 
 ## Assumptions (nonblocking)
