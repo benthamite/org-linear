@@ -31,6 +31,34 @@ workspace.
 4. Issues created in Linear land as TODOs under a configured heading in a
    configured inbox file. Once refiled anywhere in scope they keep syncing.
 
+Author's design choices, approved with the plan:
+
+5. Multiple configurations are profiles in one package, not separate copies:
+   the user keeps the existing mirror setup and adds the in-place one.
+6. The mirror layout's behavior does not change; it routes through the new
+   layout functions, and its test suite passes unchanged.
+7. The in-place sync never deletes heading text: personal notes hold more
+   than the task, and Org is the primary copy.
+8. A closed issue keeps its heading (done keyword set); a trashed issue only
+   loses its `LINEAR_UUID` property. Same reason as 7.
+9. Each Org file maps to a `file:<basename>` label, not a Linear project:
+   projects in Linear need team scoping and add a second hierarchy to keep in
+   sync; a label is enough to filter by source.
+10. The property stays `LINEAR_UUID`, as in the mirror layout, so code and
+    users see one convention.
+11. A repeating TODO is one issue whose date and state follow Org's repeat:
+    Linear's recurring templates cannot be driven from Org reliably.
+12. A file with unsaved edits is skipped for that sync; an unmodified buffer
+    whose file changed on disk is reverted first: the user edits these files
+    directly and on another device (via git).
+13. The first import is throttled, resumable and preceded by a read-only
+    preview: hundreds of issues are created at once.
+14. Exclusions (files, tags, keywords) are user options with no
+    user-specific defaults in the package; habits are always excluded,
+    since a habit's repeat history has no Linear counterpart.
+15. Out of scope for v1: sub-issues, projects, cycles, estimates, Linear
+    recurring templates.
+
 ## Current state (verified in `org-linear.el`)
 
 - All options are global `defcustom`s and all sync state is global `defvar`s
@@ -173,6 +201,8 @@ same in the opposite order.
 | Live acceptance | preview → import one small file → import the rest, checking Linear's issue count against the preview |
 
 ## Assumptions (nonblocking)
+
+(Now also listed as fixed decisions 9, 10 and 14.)
 
 - The property stays `LINEAR_UUID`, as in the mirror layout.
 - No Linear projects in the in-place layout; the `file:` label stands in.
