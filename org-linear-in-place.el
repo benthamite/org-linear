@@ -88,7 +88,7 @@ visited itself; :skipped maps files to why they are left out."
                     :new nil
                     :pending (make-hash-table :test #'equal)
                     :duplicates (make-hash-table :test #'equal)
-                    :buffers nil :opened nil
+                    :buffers nil :opened nil :linked nil
                     :skipped (make-hash-table :test #'equal)
                     :indexed (make-hash-table :test #'equal)))
         (cache (org-linear-in-place--cache))
@@ -694,22 +694,50 @@ whose file has unsaved edits is linked by a later sync."
                           (alist-get 'identifier task) (plist-get place :file)))))))
 
 (defun org-linear-in-place--edit-file (file edit)
-  "Call EDIT at the start of FILE, widened, and save it.
-Nothing happens if FILE's buffer has unsaved edits; a buffer visited for
-this is killed afterwards."
+  "Call EDIT at the start of FILE, widened, as a sync edit.
+The buffer is saved once, when the sync ends; see
+`org-linear-in-place--flush'.  Nothing happens if the buffer has edits
+of its own: unsaved ones before the sync touched it, or any since."
   (let* ((visiting (find-buffer-visiting file))
-         (buffer (or visiting (org-linear-in-place--visit file))))
-    (if (buffer-modified-p buffer)
-        (org-linear--log "Not linked yet: %s has unsaved edits" (abbreviate-file-name file))
+         (buffer (or visiting (org-linear-in-place--visit file)))
+         (entry (seq-find (lambda (e) (eq (plist-get e :buffer) buffer))
+                          (plist-get org-linear--scan :linked))))
+    (cond
+     ((if entry
+          (/= (plist-get entry :tick) (buffer-chars-modified-tick buffer))
+        (buffer-modified-p buffer))
+      (org-linear--log "Not linked yet: %s has edits of yours; the next sync links it"
+                       (abbreviate-file-name file))
+      (unless (or entry visiting) (kill-buffer buffer)))
+     (t
       (with-current-buffer buffer
-        (unless (derived-mode-p 'org-mode) (org-mode))
-        (unless (verify-visited-file-modtime buffer)
-          (let ((inhibit-message t)) (revert-buffer t t t)))
+        (unless entry
+          (unless (derived-mode-p 'org-mode) (org-mode))
+          (unless (verify-visited-file-modtime buffer)
+            (let ((inhibit-message t)) (revert-buffer t t t))))
         (org-linear--with-sync-edits
-         (lambda () (goto-char (point-min)) (funcall edit)))
-        (org-linear--save buffer)
-        (org-linear-in-place--refresh-cache buffer))
-      (unless visiting (kill-buffer buffer)))))
+         (lambda () (goto-char (point-min)) (funcall edit))))
+      (if entry
+          (plist-put entry :tick (buffer-chars-modified-tick buffer))
+        (plist-put org-linear--scan :linked
+                   (cons (list :buffer buffer :visited (not visiting)
+                               :tick (buffer-chars-modified-tick buffer))
+                         (plist-get org-linear--scan :linked))))))))
+
+(defun org-linear-in-place--flush ()
+  "Save the buffers the sync linked issues in, each once, and close its own.
+A buffer edited by you since the sync's last edit is left unsaved, with
+the sync's edits in it, and the log says so."
+  (dolist (entry (plist-get org-linear--scan :linked))
+    (let ((buffer (plist-get entry :buffer)))
+      (when (buffer-live-p buffer)
+        (if (/= (plist-get entry :tick) (buffer-chars-modified-tick buffer))
+            (org-linear--log "Not saved: %s has edits of yours; save it to keep the new links"
+                             (buffer-name buffer))
+          (org-linear--save buffer)
+          (org-linear-in-place--refresh-cache buffer)
+          (when (plist-get entry :visited) (kill-buffer buffer))))))
+  (plist-put org-linear--scan :linked nil))
 
 ;;;; Visiting files
 

@@ -575,6 +575,7 @@ sync runs in the profile in effect."
 (declare-function org-linear-in-place--set-todo "org-linear-in-place" (keyword task))
 (declare-function org-linear-in-place--run-archive "org-linear-in-place" (op next))
 (declare-function org-linear-in-place--link-created "org-linear-in-place" (place view md task))
+(declare-function org-linear-in-place--flush "org-linear-in-place" ())
 
 (defun org-linear--start ()
   "Save the file if needed, then fetch the issues."
@@ -2136,6 +2137,7 @@ not sent again while later edits still go through."
 
 (defun org-linear--finish ()
   "End the sync, report it, and start any sync requested meanwhile."
+  (org-linear--flush-in-place)
   (setq org-linear--busy nil
         org-linear--api-key-cache nil)
   (org-linear--report)
@@ -2148,9 +2150,15 @@ not sent again while later edits still go through."
       (when org-linear--pending
         (run-with-timer 1 nil (org-linear--bound #'org-linear-sync))))))
 
+(defun org-linear--flush-in-place ()
+  "Save what an in-place sync has linked, if this profile is in place."
+  (when (and (eq org-linear-layout 'in-place) org-linear--scan)
+    (org-linear-in-place--flush)))
+
 (defun org-linear--fail (format-string &rest args)
   "End the sync with an error described by FORMAT-STRING and ARGS."
   (let ((text (apply #'format format-string args)))
+    (org-linear--flush-in-place)
     (org-linear--log "Error: %s" text)
     (setq org-linear--api-key-cache nil
           org-linear--announce nil

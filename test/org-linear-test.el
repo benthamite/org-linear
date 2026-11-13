@@ -2391,5 +2391,24 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (should (= 1 (length (plist-get scan :new))))
       (dolist (buffer (plist-get scan :opened)) (kill-buffer buffer)))))
 
+(ert-deftest org-linear-test-in-place-one-save-per-file ()
+  "A sync that links several new issues in one file saves it once."
+  (org-linear-test--with-notes
+      `(("work.org" . ,(mapconcat (lambda (n) (format "* TODO Task %d\n" n)) (number-sequence 1 4) "")))
+    (let ((saves 0))
+      (cl-letf (((symbol-function 'org-linear-in-place--refresh-cache)
+                 (let ((orig (symbol-function 'org-linear-in-place--refresh-cache)))
+                   (lambda (buffer)
+                     (when (string-suffix-p "work.org" (buffer-file-name buffer)) (cl-incf saves))
+                     (funcall orig buffer)))))
+        (org-linear-test--sync))
+      ;; One save when the scan's edits (pending IDs) are written, one for the links.
+      (should (= saves 2))
+      (should (= 4 (with-temp-buffer
+                     (insert (org-linear-test--note "work.org"))
+                     (how-many "^:LINEAR_UUID:" (point-min) (point-max)))))
+      (should-not (string-match-p "PENDING" (org-linear-test--note "work.org")))
+      (should-not (find-buffer-visiting (expand-file-name "work.org" org-linear-test--notes))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
