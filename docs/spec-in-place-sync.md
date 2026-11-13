@@ -1,6 +1,6 @@
 # Spec: in-place sync of Org TODOs across many files
 
-Status: plan approved for design; not implemented.
+Status: approved; revised after one independent review (findings 1–4 and 6 accepted as defects; finding 5 is a decision for the user). Not implemented.
 
 ## Goal
 
@@ -103,7 +103,7 @@ layout go behind a small set of layout functions:
 
 | Concern | mirror | in-place |
 |---|---|---|
-| Find issue headings | level-2 headings of one file | open-keyword headings in scope across files |
+| Find issue headings | level-2 headings of one file | in-scope headings across files (§3) |
 | New heading → create | level 2 under a project | any in-scope heading without `LINEAR_UUID` |
 | Project | parent heading | none |
 | Body | to next heading | to next heading of any level (children are not body) |
@@ -111,23 +111,41 @@ layout go behind a small set of layout functions:
 | Closed issue | archive/delete heading | keep heading, set done keyword |
 | Trashed issue | delete heading | drop `LINEAR_UUID`, keep heading, log |
 | Conflict winner | Linear | Org |
+| Linked heading gone from Org | n/a | archive the issue in Linear |
 
 ### 3. Scope and the file scan (in-place)
 
 - Options: `:directories`, `:exclude-files` (regexps), `:exclude-tags`,
   `:exclude-keywords` (e.g. `PROJECT`), habits always excluded.
-- A heading is in scope if it has a not-done TODO keyword and no excluded tag
-  (inherited tags count), or it has `LINEAR_UUID` (so a heading closed in Org
-  still sends its close).
+- Exclusions always apply. A heading is *excluded* if its file matches
+  `:exclude-files`, it has an excluded tag (inherited tags count), an excluded
+  keyword, or is a habit. A heading that is not excluded is *in scope* if it
+  has a not-done TODO keyword, or it has `LINEAR_UUID` (so a heading closed in
+  Org still sends its close). (Review finding 1.)
+- *Presence* is separate from scope. Every `LINEAR_UUID` found anywhere the
+  scan looks (all `*.org` and `*.org_archive` files in `:directories`,
+  excluded files and dirty buffers included) counts as present. A present
+  issue is never inserted again, whatever its heading's scope. An excluded or
+  skipped heading neither pulls nor pushes; the sync logs it once per change.
+  (Review finding 2.)
+- An issue with a sync base whose UUID is present nowhere was deleted or moved
+  out of the scanned directories in Org: the sync archives it in Linear (an
+  undoable action) and drops its base. Only issues with no base (created in
+  Linear) go to the inbox.
 - The index is a hash from UUID to (file . marker) across files, plus new
   headings and duplicates (same UUID twice, e.g. after copying a heading:
   refuse to sync that UUID and log, as today).
 - Cost control: list candidate files with a fast text search for TODO lines
-  or `LINEAR_UUID`, and cache each file's index by modification time. Visit a
-  file only to index it or to apply edits to it.
+  or `LINEAR_UUID`. The cache keeps no markers: per file it stores the
+  modification time, the UUIDs present and whether the file has candidate
+  headings, keyed also by a hash of the scope options, so changing an
+  exclusion invalidates it. A file is visited and indexed afresh (new
+  markers) whenever the sync must read or edit its headings. (Review finding
+  4.)
 - A file that is not already visited is opened, edited, saved and its buffer
-  killed. A file with unsaved edits is skipped for this sync and logged; its
-  issues neither pull nor push until it is saved. A file changed on disk since
+  killed; its markers are dropped with it. A file with unsaved edits is
+  skipped for this sync and logged; its issues neither pull nor push until it
+  is saved, and no edit is made to its buffer. A file changed on disk since
   its buffer was read is reverted first if the buffer is unmodified (covers
   edits pulled in by git from another device), otherwise skipped.
 
@@ -152,10 +170,21 @@ back to open, date moved forward). The next sync sees an open heading with a
 new date and reopens the issue with that date. Completing it in Org does the
 same in the opposite order.
 
+The repeat must happen once per completion, even if a sync is cut short
+between saving the heading and saving the state (review finding 6). The
+sync records on the heading, as a `LINEAR_REPEATED` property, the Linear
+completion time it acted on, and saves the file before the state; a later
+sync that sees the same completion time does not repeat again and only
+reopens the issue with the heading's current date.
+
 ### 6. Creation and first import
 
-- New in-scope headings get an issue each, reusing the `LINEAR_PENDING_UUID`
-  mechanism so a lost reply never creates a duplicate.
+- New in-scope headings get an issue each. Before the create is sent, the
+  heading gets a `LINEAR_PENDING_UUID` and its file is saved; if the file has
+  unsaved edits the heading waits for a later sync. The create is sent only
+  after that save succeeded, and its answer is applied only if the file is
+  still unmodified; otherwise the next sync links the heading by its pending
+  UUID, wherever it now is and whatever its title. (Review finding 3.)
 - Creation is throttled to stay well inside Linear's documented API rate
   limits (check the current numbers when implementing; do not hard-code a
   guess). A large first import spreads over several syncs and resumes safely.
@@ -196,7 +225,12 @@ same in the opposite order.
 | Never deletes text | ERT: trash, close and out-of-scope cases leave heading text intact |
 | Unsaved and changed-on-disk files | ERT for skip and revert paths |
 | Linear-created issues reach the inbox | ERT; live: create one issue in Linear, see it in the inbox file |
-| Repeaters | ERT; live: complete a repeating issue in Linear, see the date advance and the issue reopen |
+| Repeaters | ERT both directions, plus a sync cut short after the heading save: one repeat only; live: complete a repeating issue in Linear and another in Org, see each date advance once and the issue reopen |
+| Exclusions beat `LINEAR_UUID` | ERT: linked heading gains an excluded tag (own and inherited), keyword, habit, file |
+| Present-but-skipped never duplicated | ERT over successive syncs: dirty file, excluded refile, archived to `_archive`, then restored |
+| Heading deleted in Org | ERT: issue archived in Linear, not reinserted |
+| Creation safe across async edits | ERT: lost create reply; file edited while a create is in flight; heading retitled and refiled before relinking |
+| Cache without markers | ERT: two syncs over initially unvisited files; exclusion change invalidates cache |
 | First import resumable | ERT: interrupt mid-import, rerun, no duplicates |
 | Live acceptance | preview → import one small file → import the rest, checking Linear's issue count against the preview |
 
