@@ -2157,7 +2157,7 @@ the description is unchanged."
   (let ((start (car (org-linear--split-description (alist-get 'description task)))))
     (list :title (alist-get 'title task)
           :todo (org-linear--remote-keyword task base)
-          :priority (cdr (assq (alist-get 'priority task) org-linear-priorities))
+          :priority (org-linear--remote-cookie task base)
           :tags (org-linear--without-start-tag (org-linear--remote-tags task) start)
           :deadline (alist-get 'due task)
           :scheduled start
@@ -2167,6 +2167,17 @@ the description is unchanged."
                     (gethash (cons 'desc (alist-get 'id task)) converted)
                     (plist-get base :body)
                     ""))))
+
+(defun org-linear--remote-cookie (task base)
+  "Return the priority cookie that stands for TASK's priority.
+In the in-place layout several cookies can stand for one priority, so the
+cookie of BASE is kept while it is still sent as that priority."
+  (let ((cookie (cdr (assq (alist-get 'priority task) org-linear-priorities)))
+        (old (plist-get base :priority)))
+    (if (and (eq org-linear-layout 'in-place) old (not (equal old cookie))
+             (eql (org-linear--cookie-priority old) (alist-get 'priority task)))
+        old
+      cookie)))
 
 (defun org-linear--remote-keyword (task base)
   "Return the keyword that stands for TASK's state.

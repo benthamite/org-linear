@@ -460,7 +460,7 @@ A linked heading that is no longer in any file under @code{org-linear-directorie
 @item
 A file with unsaved edits is skipped@comma{} and so is one edited while the sync runs: its headings neither pull nor push until it is saved. A buffer whose file changed on disk is reverted first if it has no unsaved edits. The sync never deletes heading text.
 @item
-Several keywords can stand for one Linear state@comma{} through @code{org-linear-keyword-states}; a heading keeps its keyword while its issue stays in that state. A keyword with no state is sent as the team's first unstarted state@comma{} or first completed one for a done keyword; a state whose keyword Org lacks arrives as Org's first open or done keyword.
+Several keywords can stand for one Linear state@comma{} through @code{org-linear-keyword-states}; a heading keeps its keyword while its issue stays in that state. Likewise several cookies can stand for one priority@comma{} through @code{org-linear-priorities}@comma{} and a heading keeps its cookie while its issue keeps that priority. A keyword with no state is sent as the team's first unstarted state@comma{} or first completed one for a done keyword; a state whose keyword Org lacks arrives as Org's first open or done keyword.
 @item
 Assignees are left alone.
 @end itemize

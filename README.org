@@ -363,7 +363,7 @@ What a sync does:
 - An issue deleted in Linear cancels its heading, which keeps its text and loses its link, so it is not created again.
 - A linked heading that is no longer in any file under ~org-linear-directories~ (deleted, or moved out) archives its issue in Linear. A heading moved to an =_archive= file still counts as present. If more than ~org-linear-archive-limit~ issues would be archived at once, as when a directory leaves the option, none is, and the log says why.
 - A file with unsaved edits is skipped, and so is one edited while the sync runs: its headings neither pull nor push until it is saved. A buffer whose file changed on disk is reverted first if it has no unsaved edits. The sync never deletes heading text.
-- Several keywords can stand for one Linear state, through ~org-linear-keyword-states~; a heading keeps its keyword while its issue stays in that state. A keyword with no state is sent as the team's first unstarted state, or first completed one for a done keyword; a state whose keyword Org lacks arrives as Org's first open or done keyword.
+- Several keywords can stand for one Linear state, through ~org-linear-keyword-states~; a heading keeps its keyword while its issue stays in that state. Likewise several cookies can stand for one priority, through ~org-linear-priorities~, and a heading keeps its cookie while its issue keeps that priority. A keyword with no state is sent as the team's first unstarted state, or first completed one for a done keyword; a state whose keyword Org lacks arrives as Org's first open or done keyword.
 - Assignees are left alone.
 
 #+vindex: org-linear-merge-body-function

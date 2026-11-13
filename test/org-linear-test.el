@@ -2240,5 +2240,15 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
         (should-not (string-match-p "Private thing" (buffer-string))))
       (kill-buffer "*org-linear preview*"))))
 
+(ert-deftest org-linear-test-in-place-cookie-of-same-priority-kept ()
+  "A cookie sent as the same Linear priority as another is not replaced."
+  (org-linear-test--with-notes '(("work.org" . "#+PRIORITIES: 1 9 7\n* TODO [#7] Minor task\n"))
+    (let ((org-linear-priorities '((1 . "1") (2 . "2") (3 . "4") (4 . "6"))))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'priority (org-linear-test--issue-titled "Minor task")) 4))
+      (org-linear-test--sync)
+      (org-linear-test--sync)
+      (should (string-match-p "^\\* TODO \\[#7\\] Minor task" (org-linear-test--note "work.org"))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
