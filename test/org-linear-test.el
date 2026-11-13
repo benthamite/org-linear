@@ -2234,6 +2234,7 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (save-window-excursion (org-linear-preview))
       (should-not org-linear-test--calls)
       (should (equal before (org-linear-test--note "health.org")))
+      (should-not (find-buffer-visiting (expand-file-name "health.org" org-linear-test--notes)))
       (with-current-buffer "*org-linear preview*"
         (should (string-match-p "New headings to create: 1" (buffer-string)))
         (should (string-match-p "  Book dentist" (buffer-string)))

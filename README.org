@@ -370,7 +370,7 @@ What a sync does:
 A description edited in Linear replaces the heading's body when the body survives a conversion to Markdown and back unchanged. When it does not, because of markup Markdown cannot hold, such as a source block's header arguments, ~org-linear-merge-body-function~ merges the two: it gets the Org body, the Markdown of the last sync, Linear's new Markdown and a callback, and calls the callback with the merged Org body, or =nil=. The result is used only if it converts to Linear's text. Otherwise, or when the option is =nil=, the body stays, the log says why, and the next sync tries again. A model makes a good merge function.
 
 #+findex: org-linear-preview
-=M-x org-linear-preview= lists, per file, the headings the next sync would create, and the files it would skip, without sending or writing anything. Run it before the first sync.
+=M-x org-linear-preview= lists, per file, the headings the next sync would create, and the files it would skip, without sending or writing anything, and closes again the files it had to open. Run it before the first sync.
 
 A configuration might look like this:
 

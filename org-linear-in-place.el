@@ -113,11 +113,11 @@ dropped when the options that decide the scope change."
   (let* ((buffer (find-buffer-visiting file))
          (mtime (file-attribute-modification-time (file-attributes file)))
          (entry (gethash file cache))
-         (dirty (and buffer (buffer-modified-p buffer))))
-    (unless (and entry (not dirty) (equal (plist-get entry :mtime) mtime))
+         (dirty (and buffer (buffer-modified-p buffer)))
+         (changed (not (and entry (not dirty) (equal (plist-get entry :mtime) mtime)))))
+    (when changed
       (setq entry (org-linear-in-place--read-file file buffer mtime))
-      (puthash file entry cache)
-      (setq entry (plist-put entry :changed t)))
+      (puthash file entry cache))
     (dolist (uuid (plist-get entry :uuids))
       (puthash uuid file (plist-get scan :present)))
     (cond
@@ -126,7 +126,7 @@ dropped when the options that decide the scope change."
       (when (plist-get entry :candidates)
         (puthash file "it has unsaved edits" (plist-get scan :skipped))))
      ((and (plist-get entry :candidates)
-           (or (plist-get entry :changed) (plist-get entry :new)))
+           (or changed (plist-get entry :new)))
       (org-linear-in-place--index-file file scan)))))
 
 (defun org-linear-in-place--read-file (file buffer mtime)
@@ -744,9 +744,9 @@ Add the heading at the end if it is missing."
 ;;;###autoload
 (defun org-linear-preview (&optional profile)
   "Show what the next in-place sync of PROFILE would create and skip.
-Nothing is sent to Linear and no file is changed, though files the scan
-visits stay visited until the next sync.  Interactively, PROFILE is the
-current buffer's, or the one you choose with a prefix argument."
+Nothing is sent to Linear and no file is changed; the files the scan
+visits are closed again.  Interactively, PROFILE is the current buffer's,
+or the one you choose with a prefix argument."
   (interactive (list (if current-prefix-arg
                          (org-linear--read-profile)
                        org-linear--buffer-profile)))
@@ -774,6 +774,9 @@ current buffer's, or the one you choose with a prefix argument."
                    (plist-get scan :skipped))
           (goto-char (point-min))
           (special-mode))
+        (dolist (buffer (plist-get scan :opened))
+          (when (and (buffer-live-p buffer) (not (buffer-modified-p buffer)))
+            (kill-buffer buffer)))
         (pop-to-buffer (current-buffer))))))
 
 (provide 'org-linear-in-place)

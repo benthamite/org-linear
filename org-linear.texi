@@ -469,7 +469,7 @@ Assignees are left alone.
 A description edited in Linear replaces the heading's body when the body survives a conversion to Markdown and back unchanged. When it does not@comma{} because of markup Markdown cannot hold@comma{} such as a source block's header arguments@comma{} @code{org-linear-merge-body-function} merges the two: it gets the Org body@comma{} the Markdown of the last sync@comma{} Linear's new Markdown and a callback@comma{} and calls the callback with the merged Org body@comma{} or @samp{nil}. The result is used only if it converts to Linear's text. Otherwise@comma{} or when the option is @samp{nil}@comma{} the body stays@comma{} the log says why@comma{} and the next sync tries again. A model makes a good merge function.
 
 @findex org-linear-preview
-@samp{M-x org-linear-preview} lists@comma{} per file@comma{} the headings the next sync would create@comma{} and the files it would skip@comma{} without sending or writing anything. Run it before the first sync.
+@samp{M-x org-linear-preview} lists@comma{} per file@comma{} the headings the next sync would create@comma{} and the files it would skip@comma{} without sending or writing anything@comma{} and closes again the files it had to open. Run it before the first sync.
 
 A configuration might look like this:
 
