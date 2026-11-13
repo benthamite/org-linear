@@ -1,6 +1,8 @@
 # Spec: in-place sync of Org TODOs across many files
 
-Status: approved; revised after one independent review (findings 1–4 and 6 accepted as defects; finding 5 decided by the user: trashed → cancelled). Not implemented.
+Status: implemented (in-place layout in `org-linear-in-place.el`, profiles in
+`org-linear.el`); first live import 2026-11-13. See "Discoveries" at the end
+for what changed from this plan.
 
 ## Goal
 
@@ -284,3 +286,26 @@ reopens the issue with the heading's current date.
 - Sub-issues from heading nesting.
 - Mapping Org files to Linear projects instead of labels.
 - Linear recurring-issue templates.
+
+## Discoveries (2026-11-13)
+
+- Linear rewrites the Markdown it is sent (bare links become
+  `[URL](<URL>)`, `-` bullets `*`, trailing spaces go) and returns the
+  rewritten text from the write. The base must keep that returned text, in
+  both layouts, or the next sync takes the rewrite for an edit made in Linear.
+- A body pull is safe only when Linear's stored old text converts back to
+  exactly the Org body; a merge is accepted when it says, as Org, what
+  Linear's text says; a held Linear text is not sent to the merge function
+  again.
+- Profiles must save and reload state at every switch: hooks, timers and
+  process callbacks enter profiles inside one another, and a stale copy let
+  several syncs of one profile run at once in the first live import, which
+  created, re-created and archived issues and rewrote bodies (all undone).
+- Linear allows 2,500 API requests per hour per key. A large import is
+  paced by `org-linear-create-limit` per scheduled sync; the backlog never
+  triggers immediate reruns, and background syncs never make the first
+  import.
+- The scan's pre-filter must match only real TODO keywords, case-sensitively;
+  a loose one visited 2,376 files instead of 113 and froze Emacs.
+- Links to new issues are written per file and saved once per sync, since
+  autocommit hooks turn each save into a commit.
