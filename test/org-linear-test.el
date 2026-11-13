@@ -2410,5 +2410,15 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (should-not (string-match-p "PENDING" (org-linear-test--note "work.org")))
       (should-not (find-buffer-visiting (expand-file-name "work.org" org-linear-test--notes))))))
 
+(ert-deftest org-linear-test-in-place-backlog-in-unchanged-file ()
+  "Headings left for later syncs are created even if their file does not change."
+  (org-linear-test--with-notes
+      `(("a.org" . ,(mapconcat (lambda (n) (format "* TODO Task %d\n" n)) (number-sequence 1 3) ""))
+        ("b.org" . ,(mapconcat (lambda (n) (format "* TODO Task %d\n" n)) (number-sequence 4 6) "")))
+    (let ((org-linear-create-limit 2))
+      (dotimes (_ 4) (org-linear-test--sync))
+      (should (= 6 (length (seq-filter (lambda (i) (string-match-p "\\`Task [0-9]" (alist-get 'title i)))
+                                       (hash-table-values org-linear-test--issues))))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

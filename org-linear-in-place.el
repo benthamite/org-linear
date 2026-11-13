@@ -123,9 +123,14 @@ dropped when the options that decide the scope change."
       (plist-put org-linear--state :files (make-hash-table :test #'equal)))
     (plist-get org-linear--state :files)))
 
+(defconst org-linear-in-place--cache-version 2
+  "Version of the scan cache's entries; a new one makes the scan read again.")
+
 (defun org-linear-in-place--scope-key ()
-  "Return a value that changes when an option deciding the scope changes."
-  (sxhash-equal (list org-linear-directories org-linear-exclude-files
+  "Return a value that changes when an option deciding the scope changes.
+It also changes with `org-linear-in-place--cache-version'."
+  (sxhash-equal (list org-linear-in-place--cache-version
+                      org-linear-directories org-linear-exclude-files
                       org-linear-exclude-tags org-linear-exclude-keywords)))
 
 (defun org-linear-in-place--excluded-file-p (file)
@@ -169,7 +174,31 @@ creations in flight, so that their issues count as present."
           uuids)
       (while (re-search-forward "^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:[ \t]+\\(\\S-+\\)" nil t)
         (push (match-string-no-properties 1) uuids))
-      (list :mtime mtime :uuids (nreverse uuids) :candidates (and candidates t)))))
+      (list :mtime mtime :uuids (nreverse uuids) :candidates (and candidates t)
+            :new (and candidates (org-linear-in-place--unlinked-heading-p))))))
+
+(defun org-linear-in-place--unlinked-heading-p ()
+  "Return non-nil if the current buffer's text may hold a heading to create.
+That is an open TODO heading, by keyword and not excluded by it, whose
+entry has no Linear ID, or a line setting the file's own keywords.  Tags
+and habits are not checked, so this can say yes for a heading the scan
+then leaves out; it never says no for one the scan would create."
+  (let ((case-fold-search nil)
+        (heading (concat "^\\*+ +"
+                         (regexp-opt (seq-difference (org-linear-in-place--open-keywords)
+                                                     org-linear-exclude-keywords))
+                         "\\(?: \\|$\\)"))
+        found)
+    (goto-char (point-min))
+    (if (re-search-forward "^#\\+\\(?:SEQ_\\|TYP_\\)?TODO:" nil t)
+        t
+      (while (and (not found) (re-search-forward heading nil t))
+        (let ((end (save-excursion
+                     (if (re-search-forward "^\\*+ " nil t) (match-beginning 0) (point-max)))))
+          (unless (save-excursion
+                    (re-search-forward "^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:" end t))
+            (setq found t))))
+      found)))
 
 (defun org-linear-in-place--index-file (file scan)
   "Visit FILE and add its headings to SCAN, unless it cannot be edited now.
