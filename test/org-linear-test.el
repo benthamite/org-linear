@@ -68,7 +68,7 @@ The fake Linear still carries the operation out.")
   "Return a fake issue ID IDENTIFIER TITLE with the given fields."
   `((id . ,id) (identifier . ,identifier) (url . ,(concat "https://linear.app/x/issue/" identifier))
     (title . ,title) (description . ,description) (priority . ,(or priority 0)) (dueDate . ,due)
-    (updatedAt . "2026-10-30T09:00:00Z")
+    (updatedAt . ,(copy-sequence "2026-10-30T09:00:00Z"))
     (completedAt . ,(and closed-at (equal (alist-get 'type (org-linear-test--state state)) "completed")
                          closed-at))
     (canceledAt . ,(and closed-at (not (equal (alist-get 'type (org-linear-test--state state)) "completed"))
@@ -175,9 +175,12 @@ A string is an error message."
             (ids (append (alist-get 'in (alist-get 'id filter)) nil))
             (cutoff (and (alist-get 'or filter)
                          (alist-get 'gt (alist-get 'completedAt (aref (alist-get 'or filter) 1)))))
+            (since (alist-get 'gt (alist-get 'updatedAt filter)))
             nodes)
        (maphash (lambda (id issue)
-                  (when (if ids (member id ids) (org-linear-test--in-scope-p issue cutoff))
+                  (when (cond (ids (member id ids))
+                              (since (string< since (alist-get 'updatedAt issue)))
+                              (t (org-linear-test--in-scope-p issue cutoff)))
                     (push issue nodes)))
                 org-linear-test--issues)
        `((issues . ((pageInfo . ((hasNextPage . :false) (endCursor . nil)))
@@ -220,6 +223,17 @@ A string is an error message."
        (puthash id issue org-linear-test--issues)
        (org-linear-test--apply-input id input)
        `((issueCreate . ((success . t) (issue . ,(gethash id org-linear-test--issues)))))))
+    ("OrgLinearArchive"
+     (let ((issue (gethash (alist-get 'id variables) org-linear-test--issues)))
+       (setf (alist-get 'archived issue) t)
+       (puthash (alist-get 'id variables) issue org-linear-test--issues)
+       '((issueArchive . ((success . t))))))
+    ("OrgLinearLabel"
+     (let ((label `((id . ,(format "l-new-%d" (cl-incf org-linear-test--clock)))
+                    (name . ,(alist-get 'name (alist-get 'input variables)))
+                    (team . nil))))
+       (setq org-linear-test--labels (append org-linear-test--labels (list label)))
+       `((issueLabelCreate . ((success . t) (issueLabel . ,label))))))
     (_ (format "unknown operation %s" name))))
 
 (defun org-linear-test--apply-input (id input)
@@ -1889,6 +1903,342 @@ not change with the state of fontification."
                         (should-not (and (> (length item) 0)
                                          (text-properties-at 0 item)
                                          field)))))))))
+
+;;;; In-place layout
+
+(defvar org-linear-test--notes nil
+  "Directory of the notes of the running in-place test.")
+
+(defmacro org-linear-test--with-notes (files &rest body)
+  "Run BODY over a notes directory holding FILES, synced in place.
+FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
+  (declare (indent 1))
+  `(org-linear-test--with-board
+     (let* ((org-linear-test--notes (file-name-as-directory (expand-file-name "notes" org-linear-test--dir)))
+            (org-linear-layout 'in-place)
+            (org-linear-directories (list org-linear-test--notes))
+            (org-linear-inbox-file (expand-file-name "inbox.org" org-linear-test--notes))
+            (org-linear-exclude-tags '("private"))
+            (org-linear-exclude-files '("/excluded\\.org\\'"))
+            (org-linear-conflict-winner 'org)
+            (org-linear-merge-body-function nil)
+            (org-todo-keywords '((sequence "TODO(t)" "IMPORTANT(i)" "WAITING(w)"
+                                           "|" "DONE(d)" "CANCELLED(c)")))
+            (org-linear-test--labels (copy-sequence org-linear-test--labels))
+            (org-linear--scan nil)
+            (org-linear--body-overrides nil)
+            (clock 0))
+       (make-directory org-linear-test--notes t)
+       (dolist (file ,files)
+         (with-temp-file (expand-file-name (car file) org-linear-test--notes) (insert (cdr file))))
+       (cl-letf (((symbol-function 'org-linear-test--tick)
+                  (lambda () (format-time-string "%FT%TZ" (time-add nil (cl-incf clock)) t))))
+         (unwind-protect
+             (progn ,@body)
+           (dolist (buffer (buffer-list))
+             (when (and (buffer-file-name buffer)
+                        (string-prefix-p org-linear-test--notes (buffer-file-name buffer)))
+               (with-current-buffer buffer (set-buffer-modified-p nil))
+               (kill-buffer buffer))))))))
+
+(defun org-linear-test--note (name)
+  "Return the text of note file NAME on disk."
+  (with-temp-buffer
+    (insert-file-contents (expand-file-name name org-linear-test--notes))
+    (buffer-string)))
+
+(defun org-linear-test--write-note (name text)
+  "Replace note file NAME with TEXT on disk, as an edit from elsewhere."
+  (with-temp-file (expand-file-name name org-linear-test--notes) (insert text))
+  (set-file-times (expand-file-name name org-linear-test--notes) (time-add nil 5)))
+
+(defun org-linear-test--uuid-of (name title)
+  "Return the LINEAR_UUID of the heading TITLE in note file NAME."
+  (with-temp-buffer
+    (insert-file-contents (expand-file-name name org-linear-test--notes))
+    (org-mode)
+    (goto-char (point-min))
+    (re-search-forward (format "^\\*+ .*%s" (regexp-quote title)))
+    (org-entry-get nil "LINEAR_UUID")))
+
+(defun org-linear-test--issue-titled (title)
+  "Return the fake issue titled TITLE, or nil."
+  (seq-find (lambda (issue) (equal (alist-get 'title issue) title))
+            (hash-table-values org-linear-test--issues)))
+
+(defconst org-linear-test--health
+  "* Health\n** TODO Book dentist\nCall before noon.\n** TODO Private thing :private:\n** DONE Old thing\n** Plain heading\n"
+  "A note file with one task to sync.")
+
+(ert-deftest org-linear-test-in-place-first-sync ()
+  "A first sync creates issues for headings and adds Linear's issues to the inbox."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((issue (org-linear-test--issue-titled "Book dentist")))
+      (should issue)
+      (should (equal (alist-get 'description issue) "Call before noon."))
+      (should (member "file:health" (mapcar (lambda (l) (alist-get 'name l))
+                                            (alist-get 'nodes (alist-get 'labels issue)))))
+      (should (equal (org-linear-test--uuid-of "health.org" "Book dentist")
+                     (alist-get 'id issue))))
+    (should-not (org-linear-test--issue-titled "Private thing"))
+    (should-not (org-linear-test--issue-titled "Old thing"))
+    (should-not (string-match-p "LINEAR_PENDING_UUID" (org-linear-test--note "health.org")))
+    (let ((inbox (org-linear-test--note "inbox.org")))
+      (should (string-match-p "^\\* Linear$" inbox))
+      (should (string-match-p "^\\*\\* TODO \\[#B\\] Task one" inbox))
+      (should (string-match-p "^\\*\\* TODO Peter's task" inbox))
+      (should-not (string-match-p "Closed" inbox))
+      (should-not (string-match-p ":pablo:" inbox)))
+    (should-not (seq-filter (lambda (b) (and (buffer-file-name b)
+                                             (string-prefix-p org-linear-test--notes (buffer-file-name b))))
+                            (buffer-list)))))
+
+(ert-deftest org-linear-test-in-place-second-sync-quiet ()
+  "A sync right after the first sends nothing and changes no file."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((health (org-linear-test--note "health.org"))
+          (inbox (org-linear-test--note "inbox.org")))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--writes))
+      (should (equal health (org-linear-test--note "health.org")))
+      (should (equal inbox (org-linear-test--note "inbox.org"))))))
+
+(ert-deftest org-linear-test-in-place-pulls-and-pushes ()
+  "Edits made in Linear reach the heading, and edits made in Org reach Linear."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist"))))
+      (org-linear-test--edit id 'title "Book the dentist")
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Book the dentist" (org-linear-test--note "health.org")))
+      (org-linear-test--write-note
+       "health.org" (replace-regexp-in-string "Call before noon\\." "Call after noon."
+                                              (org-linear-test--note "health.org")))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash id org-linear-test--issues))
+                     "Call after noon.")))))
+
+(ert-deftest org-linear-test-in-place-org-wins-conflicts ()
+  "When both sides change a title, Org's stays and goes to Linear."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist"))))
+      (org-linear-test--edit id 'title "Linear title")
+      (org-linear-test--write-note
+       "health.org" (replace-regexp-in-string "Book dentist" "Org title"
+                                              (org-linear-test--note "health.org")))
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Org title" (org-linear-test--note "health.org")))
+      (should (equal (alist-get 'title (gethash id org-linear-test--issues)) "Org title"))
+      (should (string-match-p "kept yours" (org-linear-test--log))))))
+
+(ert-deftest org-linear-test-in-place-keyword-of-same-state-kept ()
+  "A keyword that maps to the same Linear state as another is not replaced."
+  (org-linear-test--with-notes '(("work.org" . "* IMPORTANT Big task\n"))
+    (org-linear-test--sync)
+    (let ((issue (org-linear-test--issue-titled "Big task")))
+      (should (equal (alist-get 'name (alist-get 'state issue)) "Todo")))
+    (org-linear-test--sync)
+    (org-linear-test--sync)
+    (should (string-match-p "^\\* IMPORTANT Big task" (org-linear-test--note "work.org")))))
+
+(ert-deftest org-linear-test-in-place-exclusion-beats-link ()
+  "A linked heading that becomes excluded neither syncs nor comes back in the inbox."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist"))))
+      (org-linear-test--write-note
+       "health.org" (replace-regexp-in-string "Book dentist" "Book dentist :private:"
+                                              (org-linear-test--note "health.org")))
+      (org-linear-test--sync)
+      (org-linear-test--edit id 'title "Changed in Linear")
+      (org-linear-test--sync)
+      (should-not (string-match-p "Changed in Linear" (org-linear-test--note "health.org")))
+      (should-not (string-match-p "Changed in Linear" (org-linear-test--note "inbox.org")))
+      (should-not (alist-get 'archived (gethash id org-linear-test--issues))))))
+
+(ert-deftest org-linear-test-in-place-unsaved-file-skipped ()
+  "A file with unsaved edits is neither edited nor duplicated in the inbox."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let* ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+           (buffer (find-file-noselect (expand-file-name "health.org" org-linear-test--notes))))
+      (with-current-buffer buffer
+        (goto-char (point-max))
+        (insert "unsaved\n"))
+      (org-linear-test--edit id 'title "Changed in Linear")
+      (org-linear-test--sync)
+      (with-current-buffer buffer
+        (should-not (string-match-p "Changed in Linear" (buffer-string))))
+      (should-not (string-match-p "Changed in Linear" (org-linear-test--note "inbox.org")))
+      (should (string-match-p "unsaved edits" (org-linear-test--log)))
+      (with-current-buffer buffer (save-buffer))
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Changed in Linear" (org-linear-test--note "health.org"))))))
+
+(ert-deftest org-linear-test-in-place-archived-heading-stays-present ()
+  "A heading moved to an archive file is not added to the inbox again."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let* ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+           (text (org-linear-test--note "health.org"))
+           (start (string-match "^\\*\\* TODO Book dentist" text))
+           (end (string-match "^\\*\\* TODO Private" text)))
+      (org-linear-test--write-note "health.org_archive" (concat "* Archived\n" (substring text start end)))
+      (org-linear-test--write-note "health.org" (concat (substring text 0 start) (substring text end)))
+      (org-linear-test--edit id 'title "Changed in Linear")
+      (org-linear-test--sync)
+      (should-not (string-match-p "Changed in Linear" (org-linear-test--note "inbox.org")))
+      (should-not (alist-get 'archived (gethash id org-linear-test--issues))))))
+
+(ert-deftest org-linear-test-in-place-deleted-heading-archives-issue ()
+  "A linked heading deleted in Org archives its issue, which does not come back."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist"))))
+      (org-linear-test--write-note "health.org" "* Health\n")
+      (org-linear-test--sync)
+      (should (alist-get 'archived (gethash id org-linear-test--issues)))
+      (org-linear-test--sync)
+      (should-not (string-match-p "Book dentist" (org-linear-test--note "inbox.org"))))))
+
+(ert-deftest org-linear-test-in-place-mass-vanishing-archives-nothing ()
+  "More vanished headings than `org-linear-archive-limit' archive none."
+  (org-linear-test--with-notes
+      `(("work.org" . ,(mapconcat (lambda (n) (format "* TODO Task %d\n" n)) (number-sequence 1 7) "")))
+    (org-linear-test--sync)
+    (org-linear-test--write-note "work.org" "")
+    (org-linear-test--sync)
+    (should-not (org-linear-test--calls "OrgLinearArchive"))
+    (should (string-match-p "more than `org-linear-archive-limit'" (org-linear-test--log)))))
+
+(ert-deftest org-linear-test-in-place-trashed-issue-cancels-heading ()
+  "An issue deleted in Linear cancels its heading, which keeps its text and is not recreated."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          (count (hash-table-count org-linear-test--issues)))
+      (org-linear-test--edit id 'trashed t)
+      (org-linear-test--sync)
+      (let ((text (org-linear-test--note "health.org")))
+        (should (string-match-p "^\\*\\* CANCELLED Book dentist" text))
+        (should (string-match-p "Call before noon" text))
+        (should-not (string-match-p (regexp-quote id) text)))
+      (org-linear-test--sync)
+      (should (= count (hash-table-count org-linear-test--issues))))))
+
+(ert-deftest org-linear-test-in-place-repeat-once ()
+  "Closing a repeating issue in Linear repeats its heading once, even if the state is lost."
+  (org-linear-test--with-notes
+      '(("habits.org" . "* TODO Water plants\nDEADLINE: <2026-11-10 Tue +1w>\n"))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Water plants")))
+          (state (with-temp-buffer (insert-file-contents org-linear-state-file) (buffer-string))))
+      (org-linear-test--edit id 'state (org-linear-test--state "s-done"))
+      (org-linear-test--edit id 'completedAt (org-linear-test--tick))
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Water plants\nDEADLINE: <2026-11-17" (org-linear-test--note "habits.org")))
+      ;; As if the state were never saved after the heading.
+      (with-temp-file org-linear-state-file (insert state))
+      (setq org-linear--state nil)
+      (org-linear-test--sync)
+      (org-linear-test--sync)
+      (should (string-match-p "DEADLINE: <2026-11-17" (org-linear-test--note "habits.org")))
+      (let ((issue (gethash id org-linear-test--issues)))
+        (should (equal (alist-get 'type (alist-get 'state issue)) "unstarted"))
+        (should (equal (alist-get 'dueDate issue) "2026-11-17"))))))
+
+(ert-deftest org-linear-test-in-place-lossless-body-pulled ()
+  "A Linear description edit replaces a plain Org body."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist"))))
+      (org-linear-test--edit id 'description "Call **after** lunch.")
+      (org-linear-test--sync)
+      (should (string-match-p "Call \\*after\\* lunch\\." (org-linear-test--note "health.org"))))))
+
+(ert-deftest org-linear-test-in-place-lossy-body-merged-or-held ()
+  "A Linear edit to a body with Org-only markup is merged, or held when the merge fails."
+  (org-linear-test--with-notes
+      '(("code.org" . "* TODO Fix script\n#+begin_src emacs-lisp :tangle yes\n(foo)\n#+end_src\n"))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Fix script")))
+          (header "#+begin_src emacs-lisp :tangle yes")
+          (merged "#+begin_src emacs-lisp :tangle yes\n(bar)\n#+end_src"))
+      (org-linear-test--edit id 'description "``` commonlisp\n(bar)\n```")
+      (org-linear-test--sync)
+      (should (string-match-p "(foo)" (org-linear-test--note "code.org")))
+      (should (string-match-p "set `org-linear-merge-body-function'" (org-linear-test--log)))
+      (let ((org-linear-merge-body-function
+             (lambda (_org _old _new callback) (funcall callback "Something else."))))
+        (org-linear-test--sync)
+        (should (string-match-p "(foo)" (org-linear-test--note "code.org")))
+        (should (string-match-p "does not match" (org-linear-test--log))))
+      (let ((org-linear-merge-body-function
+             (lambda (org old new callback)
+               (should (string-match-p (regexp-quote header) org))
+               (should (string-match-p "(foo)" old))
+               (should (string-match-p "(bar)" new))
+               (funcall callback merged))))
+        (org-linear-test--sync)
+        (should (string-match-p (regexp-quote merged) (org-linear-test--note "code.org"))))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--writes))
+      (should (string-match-p (regexp-quote merged) (org-linear-test--note "code.org"))))))
+
+(ert-deftest org-linear-test-in-place-lost-create-not-repeated ()
+  "A create whose answer was lost is linked by the next sync, not made twice."
+  (org-linear-test--with-notes '(("work.org" . "* TODO Only once\n"))
+    (setq org-linear-test--lose-next "OrgLinearCreate")
+    (org-linear-sync)
+    (let ((deadline (+ (float-time) 30)))
+      (while (and org-linear--busy (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (string-match-p "LINEAR_PENDING_UUID" (org-linear-test--note "work.org")))
+    (org-linear-test--sync)
+    (should (= 1 (length (seq-filter (lambda (i) (equal (alist-get 'title i) "Only once"))
+                                     (hash-table-values org-linear-test--issues)))))
+    (should (org-linear-test--uuid-of "work.org" "Only once"))
+    (should-not (string-match-p "LINEAR_PENDING_UUID" (org-linear-test--note "work.org")))))
+
+(ert-deftest org-linear-test-in-place-create-limit ()
+  "No more than `org-linear-create-limit' issues are created in one sync."
+  (org-linear-test--with-notes
+      `(("work.org" . ,(mapconcat (lambda (n) (format "* TODO Task %d\n" n)) (number-sequence 1 5) "")))
+    (let ((org-linear-create-limit 2)
+          (org-linear--reruns 2))
+      (org-linear-test--sync)
+      (should (= 2 (length (org-linear-test--calls "OrgLinearCreate"))))
+      (org-linear-test--sync)
+      (org-linear-test--sync)
+      (should (= 5 (length (seq-filter (lambda (i) (string-match-p "\\`Task [0-9]" (alist-get 'title i)))
+                                       (hash-table-values org-linear-test--issues))))))))
+
+(ert-deftest org-linear-test-in-place-scope-change-rescans ()
+  "Changing an exclusion makes the next sync read unchanged files again."
+  (org-linear-test--with-notes '(("a.org" . "* TODO Alpha :later:\n"))
+    (let ((org-linear-exclude-tags '("later")))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--issue-titled "Alpha")))
+    (let ((org-linear-exclude-tags nil))
+      (org-linear-test--sync)
+      (should (org-linear-test--issue-titled "Alpha")))))
+
+(ert-deftest org-linear-test-in-place-preview-changes-nothing ()
+  "The preview lists new headings and sends and writes nothing."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (let ((before (org-linear-test--note "health.org")))
+      (setq org-linear-test--calls nil)
+      (save-window-excursion (org-linear-preview))
+      (should-not org-linear-test--calls)
+      (should (equal before (org-linear-test--note "health.org")))
+      (with-current-buffer "*org-linear preview*"
+        (should (string-match-p "New headings to create: 1" (buffer-string)))
+        (should (string-match-p "  Book dentist" (buffer-string)))
+        (should-not (string-match-p "Private thing" (buffer-string))))
+      (kill-buffer "*org-linear preview*"))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

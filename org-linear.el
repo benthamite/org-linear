@@ -298,8 +298,84 @@ Linear refused a write, or a closed issue can leave once its edits are sent.")
 (defvar org-linear--reruns 0
   "Consecutive reruns of the sync.")
 
+(defvar org-linear--scan nil
+  "The in-place layout's view of the files during a sync, a plist.")
+
+(defvar org-linear--body-overrides nil
+  "Hash table from issue ID to the Org body a sync pulls instead of pandoc's.")
+
 (defconst org-linear--log-buffer "*org-linear*"
   "Buffer that records conflicts, refusals and errors.")
+
+;;;; In-place layout options
+
+(defcustom org-linear-layout 'mirror
+  "How the Org side is laid out.
+`mirror' keeps every issue in `org-linear-file', under its project's
+heading, with Linear as the primary copy.  `in-place' syncs TODO headings
+wherever they are in the files under `org-linear-directories', with Org
+as the primary copy; see the manual."
+  :type '(choice (const mirror) (const in-place))
+  :group 'org-linear)
+
+(defcustom org-linear-directories nil
+  "Directories whose Org files the in-place layout syncs, recursively."
+  :type '(repeat directory)
+  :group 'org-linear)
+
+(defcustom org-linear-exclude-files nil
+  "Regexps matching the absolute names of files the in-place layout leaves out."
+  :type '(repeat regexp)
+  :group 'org-linear)
+
+(defcustom org-linear-exclude-tags nil
+  "Tags whose headings the in-place layout leaves out, inherited ones included."
+  :type '(repeat string)
+  :group 'org-linear)
+
+(defcustom org-linear-exclude-keywords nil
+  "TODO keywords whose headings the in-place layout leaves out."
+  :type '(repeat string)
+  :group 'org-linear)
+
+(defcustom org-linear-inbox-file nil
+  "File where the in-place layout puts issues created in Linear."
+  :type '(choice (const nil) file)
+  :group 'org-linear)
+
+(defcustom org-linear-inbox-heading "Linear"
+  "Top-level heading of `org-linear-inbox-file' that takes new issues."
+  :type 'string
+  :group 'org-linear)
+
+(defcustom org-linear-conflict-winner 'linear
+  "Which side keeps a field that changed on both sides since the last sync.
+The other side's value is written to the sync log."
+  :type '(choice (const linear) (const org))
+  :group 'org-linear)
+
+(defcustom org-linear-merge-body-function nil
+  "Function that merges a Linear description edit into an Org body, or nil.
+The in-place layout calls it when Linear changed a description and the
+Org body would not survive a conversion to Markdown and back.  It gets
+ORG-BODY, the Markdown OLD-MD of the last sync, Linear's NEW-MD and a
+CALLBACK, and must call CALLBACK with the merged Org body, or nil if it
+failed.  The result is used only if it converts to NEW-MD."
+  :type '(choice (const nil) function)
+  :group 'org-linear)
+
+(defcustom org-linear-create-limit 50
+  "Most issues the in-place layout creates in one sync.
+A large import spreads over several syncs, within Linear's rate limits."
+  :type 'integer
+  :group 'org-linear)
+
+(defcustom org-linear-archive-limit 5
+  "Most issues one in-place sync archives because their headings vanished.
+More than this, as when a directory leaves `org-linear-directories',
+archives none and logs why."
+  :type 'integer
+  :group 'org-linear)
 
 ;;;; Profiles
 
@@ -333,7 +409,8 @@ Nil is the default profile, whose options are the global ones.")
   '(org-linear--state org-linear--meta org-linear--api-key-cache org-linear--busy
     org-linear--pending org-linear--saving org-linear--archive org-linear--stats
     org-linear--rerun org-linear--reruns org-linear--announce org-linear--refresh-list
-    org-linear--list-buffer org-linear--agenda-project-width)
+    org-linear--list-buffer org-linear--agenda-project-width org-linear--scan
+    org-linear--body-overrides)
   "Variables that hold the state of one profile's sync.")
 
 (defun org-linear--option-variables ()
@@ -479,9 +556,23 @@ sync runs in the profile in effect."
         (org-linear--start)
       (error (org-linear--fail "%s" (error-message-string err))))))
 
+(autoload 'org-linear-preview "org-linear-in-place"
+  "Show what the next in-place sync would create and skip." t)
+(declare-function org-linear-in-place--start "org-linear-in-place" ())
+(declare-function org-linear-in-place--set-todo "org-linear-in-place" (keyword task))
+(declare-function org-linear-in-place--run-archive "org-linear-in-place" (op next))
+(declare-function org-linear-in-place--link-created "org-linear-in-place" (place view md task))
+
 (defun org-linear--start ()
   "Save the file if needed, then fetch the issues."
   (org-linear--load-state)
+  (if (eq org-linear-layout 'in-place)
+      (progn (require 'org-linear-in-place)
+             (org-linear-in-place--start))
+    (org-linear--start-mirror)))
+
+(defun org-linear--start-mirror ()
+  "Start a sync of the mirror layout: save the file, then fetch the issues."
   (let ((buffer (org-linear--buffer)))
     (with-current-buffer buffer
       (when (buffer-modified-p)
@@ -1101,6 +1192,7 @@ set are fetched too, so that their edits still sync."
       (team_id . ,(alist-get 'id (alist-get 'team issue)))
       (closed . ,(if (member type '("completed" "canceled" "duplicate")) t :false))
       (completed . ,(and closed-at (format-time-string "%F" (date-to-time closed-at))))
+      (closed_at . ,closed-at)
       (assignee_id . ,(alist-get 'id (alist-get 'assignee issue)))
       (assignee_name . ,(alist-get 'name (alist-get 'assignee issue)))
       (label_ids . ,(mapcar (lambda (label) (alist-get 'id label))
@@ -1158,15 +1250,20 @@ stands for one person."
   (replace-regexp-in-string "[^[:alnum:]_@#%]+" "_" text))
 
 (defun org-linear--managed-tags ()
-  "Return every tag that stands for a person or a label."
-  (append (plist-get org-linear--state :user-tags)
-          (plist-get org-linear--state :label-tags)))
+  "Return every tag that stands for a person or a label.
+The in-place layout leaves assignees alone, so there only labels count,
+and file labels, which stand for no tag of the heading, do not."
+  (if (eq org-linear-layout 'in-place)
+      (seq-remove #'org-linear--file-label-tag-p (plist-get org-linear--state :label-tags))
+    (append (plist-get org-linear--state :user-tags)
+            (plist-get org-linear--state :label-tags))))
 
 (defun org-linear--remote-tags (task)
   "Return TASK's assignee and label tags, sorted."
   (let ((users (plist-get org-linear--meta :users)))
     (sort (delete-dups
-           (delq nil (cons (gethash (alist-get 'assignee_id task) users)
+           (delq nil (cons (unless (eq org-linear-layout 'in-place)
+                             (gethash (alist-get 'assignee_id task) users))
                            (mapcar (lambda (id)
                                      (when-let* ((label (org-linear--label-by-id id)))
                                        (org-linear--label-tag label)))
@@ -1202,13 +1299,21 @@ stands for one person."
                                (< (alist-get 'position a) (alist-get 'position b))
                              (< (or ta 99) (or tb 99)))))))
          (named (cdr (assoc keyword org-linear-keyword-states))))
-    (if named
-        (seq-find (lambda (state) (equal (alist-get 'name state) named)) states)
-      (seq-find (lambda (state)
-                  (equal (org-linear--state-keyword (alist-get 'name state)
-                                                    (alist-get 'type state))
-                         keyword))
-                states))))
+    (or (if named
+            (seq-find (lambda (state) (equal (alist-get 'name state) named)) states)
+          (seq-find (lambda (state)
+                      (equal (org-linear--state-keyword (alist-get 'name state)
+                                                        (alist-get 'type state))
+                             keyword))
+                    states))
+        (and (eq org-linear-layout 'in-place)
+             (org-linear--fallback-state keyword states)))))
+
+(defun org-linear--fallback-state (keyword states)
+  "Return the first of STATES of the type KEYWORD falls in.
+That is a completed state for a done keyword, an unstarted one otherwise."
+  (let ((type (if (member keyword org-done-keywords) "completed" "unstarted")))
+    (seq-find (lambda (state) (equal (alist-get 'type state) type)) states)))
 
 (defun org-linear--cookie-priority (cookie)
   "Return the Linear priority for the Org priority COOKIE, 0 for none."
@@ -1469,7 +1574,7 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
          (base (or base (org-linear--base-from-local local marker)))
          (new-base (copy-sequence base))
          pushed)
-    (dolist (field org-linear--fields)
+    (dolist (field (org-linear--merge-fields))
       (let ((l (plist-get local field))
             (r (plist-get remote field))
             (b (plist-get base field)))
@@ -1484,6 +1589,9 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
            "Not sent: %s is assigned to %s, who has no tag here; change it in Linear"
            (alist-get 'identifier task) (org-linear--foreign-assignee task)))
          ((equal r b) (push (cons field l) pushed))
+         ((eq org-linear-conflict-winner 'org)
+          (org-linear--conflict task field r l)
+          (push (cons field l) pushed))
          (t
           (org-linear--set-field marker field r task projects index)
           (org-linear--conflict task field l r)
@@ -1494,6 +1602,12 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
     (setq new-base (plist-put new-base :edited (alist-get 'last_edited_time task)))
     (puthash id new-base (org-linear--state-tasks))
     (org-linear--ops-for task (nreverse pushed) marker new-base)))
+
+(defun org-linear--merge-fields ()
+  "Return the fields the merge compares, which depend on the layout."
+  (if (eq org-linear-layout 'in-place)
+      (remq :project org-linear--fields)
+    org-linear--fields))
 
 (defun org-linear--ops-for (task pushed marker base)
   "Return the edits that send the PUSHED fields and new notes of TASK.
@@ -1644,7 +1758,8 @@ The date itself arrives as a change from Linear.  MARKER is the heading."
   (pcase (plist-get op :type)
     ('update (org-linear--run-update op next))
     ('note (org-linear--run-note op next))
-    ('add (org-linear--run-add op next))))
+    ('add (org-linear--run-add op next))
+    ('archive (org-linear-in-place--run-archive op next))))
 
 (defun org-linear--run-update (op next)
   "Send the field changes of OP, then call NEXT.
@@ -1740,6 +1855,7 @@ LABEL-IDS are the issue's labels now; see `org-linear--label-ids'."
          (assignee (car assignees)))
     (append
      (cond
+      ((eq org-linear-layout 'in-place) nil)
       ((> (length people) 1)
        (org-linear--log "Not sent: an issue has one assignee, but the tags name %s"
                         (string-join people ", "))
@@ -1895,6 +2011,13 @@ too.  The issue exists by now, so a refusal is only logged."
 
 (defun org-linear--link-created (marker view md task)
   "Record TASK, created from VIEW at MARKER and sent with description MD."
+  (if (markerp marker)
+      (org-linear--link-created-mirror marker view md task)
+    (org-linear-in-place--link-created marker view md task)))
+
+(defun org-linear--link-created-mirror (marker view md task)
+  "Record TASK, created from VIEW at MARKER and sent with description MD.
+This is the mirror layout's way."
   (let ((base (append (copy-sequence view)
                       (list :desc-md md
                             :edited (alist-get 'last_edited_time task)
@@ -2033,15 +2156,45 @@ CONVERTED maps conversion keys to Org text; BASE supplies the body when
 the description is unchanged."
   (let ((start (car (org-linear--split-description (alist-get 'description task)))))
     (list :title (alist-get 'title task)
-          :todo (org-linear--state-keyword (alist-get 'status task) (alist-get 'state_type task))
+          :todo (org-linear--remote-keyword task base)
           :priority (cdr (assq (alist-get 'priority task) org-linear-priorities))
           :tags (org-linear--without-start-tag (org-linear--remote-tags task) start)
           :deadline (alist-get 'due task)
           :scheduled start
           :project (alist-get 'project_id task)
-          :body (or (gethash (cons 'desc (alist-get 'id task)) converted)
+          :body (or (and org-linear--body-overrides
+                         (gethash (alist-get 'id task) org-linear--body-overrides))
+                    (gethash (cons 'desc (alist-get 'id task)) converted)
                     (plist-get base :body)
                     ""))))
+
+(defun org-linear--remote-keyword (task base)
+  "Return the keyword that stands for TASK's state.
+In the in-place layout several keywords can stand for one state, so the
+keyword of BASE is kept while it still maps to that state."
+  (let ((keyword (org-linear--state-keyword (alist-get 'status task) (alist-get 'state_type task)))
+        (old (plist-get base :todo)))
+    (cond
+     ((not (eq org-linear-layout 'in-place)) keyword)
+     ((and old (not (equal old keyword))
+           (equal (alist-get 'name (org-linear--keyword-state old (alist-get 'team_id task)))
+                  (alist-get 'status task)))
+      old)
+     (t (org-linear--org-keyword keyword (alist-get 'closed task))))))
+
+(defun org-linear--org-keyword (keyword closed)
+  "Return KEYWORD if Org knows it, else Org's first keyword of its kind.
+That is the first done keyword when CLOSED is t, the first open one
+otherwise, from the default value of `org-todo-keywords'."
+  (let* ((sequences (mapcar (lambda (seq)
+                              (mapcar (lambda (kw) (replace-regexp-in-string "(.*)\\'" "" kw))
+                                      (cdr seq)))
+                            (default-value 'org-todo-keywords)))
+         (all (apply #'append sequences)))
+    (cond
+     ((member keyword all) keyword)
+     ((eq closed t) (or (cadr (member "|" all)) (car (last all))))
+     (t (car all)))))
 
 (defun org-linear--local-view (marker)
   "Return the issue at MARKER as Org field values."
@@ -2052,14 +2205,29 @@ the description is unchanged."
                     (substring-no-properties todo))
             :priority (org-linear--heading-priority)
             :tags (org-linear--without-start-tag
-                   (sort (seq-filter (lambda (tag) (member tag (org-linear--managed-tags)))
-                                     (org-get-tags nil t))
+                   (sort (append (seq-filter (lambda (tag) (member tag (org-linear--managed-tags)))
+                                             (org-get-tags nil t))
+                                 (org-linear--file-label-tags))
                          #'string<)
                    start)
             :deadline (org-linear--planning-date "DEADLINE")
             :scheduled start
             :project (org-linear--heading-project)
             :body (org-linear--body)))))
+
+(defun org-linear--file-label-tags ()
+  "Return the tag of the current file's label, in a list, in the in-place layout."
+  (when (and (eq org-linear-layout 'in-place) buffer-file-name)
+    (list (org-linear--label-tag
+           `((name . ,(org-linear--file-label-name buffer-file-name)))))))
+
+(defun org-linear--file-label-name (file)
+  "Return the name of the Linear label that marks issues from FILE."
+  (concat "file:" (file-name-base file)))
+
+(defun org-linear--file-label-tag-p (tag)
+  "Return non-nil if TAG stands for a file's label."
+  (string-prefix-p "file_" tag))
 
 (defun org-linear--base-from-local (local marker)
   "Return a first sync state for the heading at MARKER whose fields are LOCAL.
@@ -2226,11 +2394,14 @@ project headings."
     (_ (org-with-point-at marker
          (pcase field
            (:title (org-edit-headline value))
-           (:todo (org-linear--set-todo value (alist-get 'completed task)))
+           (:todo (if (eq org-linear-layout 'in-place)
+                      (org-linear-in-place--set-todo value task)
+                    (org-linear--set-todo value (alist-get 'completed task))))
            (:priority (org-linear--set-priority value))
-           (:tags (org-set-tags (append value (seq-remove
-                                               (lambda (tag) (member tag (org-linear--managed-tags)))
-                                               (org-get-tags nil t)))))
+           (:tags (org-set-tags (append (seq-remove #'org-linear--file-label-tag-p value)
+                                        (seq-remove
+                                         (lambda (tag) (member tag (org-linear--managed-tags)))
+                                         (org-get-tags nil t)))))
            (:deadline (org-linear--set-planning 'deadline value))
            (:scheduled (org-linear--set-planning 'scheduled value))
            (:body (org-linear--set-body value)))))))
@@ -2313,9 +2484,10 @@ PROJECTS and INDEX locate the project heading."
     (puthash (alist-get 'id task) marker (plist-get index :tasks))
     (org-linear--count :pulled)))
 
-(defun org-linear--heading-string (view completed)
+(defun org-linear--heading-string (view completed &optional level)
   "Return the text of a new heading for the issue VIEW.
-COMPLETED is its closing date, or nil."
+COMPLETED is its closing date, or nil.  LEVEL is the heading's level, 2
+by default."
   (let ((planning (string-join
                    (delq nil
                          (list (when (and completed (member (plist-get view :todo)
@@ -2327,7 +2499,7 @@ COMPLETED is its closing date, or nil."
                                (when (plist-get view :scheduled)
                                  (format "SCHEDULED: %s" (org-linear--stamp (plist-get view :scheduled))))))
                    " ")))
-    (concat "** " (plist-get view :todo) " "
+    (concat (make-string (or level 2) ?*) " " (plist-get view :todo) " "
             (when (plist-get view :priority) (format "[#%s] " (plist-get view :priority)))
             (plist-get view :title)
             (when (plist-get view :tags) (format " :%s:" (string-join (plist-get view :tags) ":")))
@@ -2620,7 +2792,10 @@ Open issues do, and closed ones for `org-linear-closed-retention-days'."
                   :me-tag (plist-get saved :me-tag)
                   :user-tags (plist-get saved :user-tags)
                   :label-tags (plist-get saved :label-tags)
-                  :archived (plist-get saved :archived))))))
+                  :archived (plist-get saved :archived)
+                  :since (plist-get saved :since)
+                  :scope-key (plist-get saved :scope-key)
+                  :files (plist-get saved :files))))))
 
 (defun org-linear--save-state ()
   "Write the sync state to `org-linear-state-file'.
@@ -2641,6 +2816,9 @@ write cut short leaves the previous state whole."
                            :user-tags (plist-get org-linear--state :user-tags)
                            :label-tags (plist-get org-linear--state :label-tags)
                            :archived (plist-get org-linear--state :archived)
+                           :since (plist-get org-linear--state :since)
+                           :scope-key (plist-get org-linear--state :scope-key)
+                           :files (plist-get org-linear--state :files)
                            :tasks entries)
                      (current-buffer))))
           (rename-file temp org-linear-state-file t))
@@ -2798,13 +2976,18 @@ error in CALLBACK ends the sync instead of leaving it running."
     (goto-char (point-max))
     (insert (format-time-string "%F %T  ") (apply #'format format-string args) "\n")))
 
-(defun org-linear--conflict (task field local remote)
-  "Log that FIELD of TASK changed on both sides; LOCAL lost to REMOTE."
+(defun org-linear--conflict (task field lost kept)
+  "Log that FIELD of TASK changed on both sides; LOST gave way to KEPT."
   (org-linear--count :conflicts)
-  (org-linear--log "Conflict in %s %s: kept Linear's %S; your %S is not sent"
-                   (alist-get 'identifier task)
-                   (substring (symbol-name field) 1)
-                   remote local))
+  (if (eq org-linear-conflict-winner 'org)
+      (org-linear--log "Conflict in %s %s: kept yours, %S; Linear's %S is replaced"
+                       (alist-get 'identifier task)
+                       (substring (symbol-name field) 1)
+                       kept lost)
+    (org-linear--log "Conflict in %s %s: kept Linear's %S; your %S is not sent"
+                     (alist-get 'identifier task)
+                     (substring (symbol-name field) 1)
+                     kept lost)))
 
 (defun org-linear--count (key)
   "Add one to the count KEY of the sync in progress."

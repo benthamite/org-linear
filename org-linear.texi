@@ -35,6 +35,7 @@ This manual describes the features and customization options for the Emacs Lisp 
 * The agenda::
 * Transient menu::
 * User options::
+* The in-place layout::
 * Limits::
 * Indices::
 
@@ -426,6 +427,70 @@ The options above make up the default profile. @code{org-linear-profiles} adds f
 @end lisp
 
 The default profile syncs when @code{org-linear-teams} is set; the others always do under @code{org-linear-auto-sync-mode}. @samp{M-x org-linear-sync} syncs the profile of the current buffer; with a prefix argument it asks which. @code{org-linear-show-log} shows the current buffer's profile's log@comma{} @samp{*org-linear: NAME*} for a named profile.
+
+@node The in-place layout
+@chapter The in-place layout
+
+@vindex org-linear-layout
+By default org-linear mirrors Linear into one file@comma{} with Linear as the primary copy. Setting @code{org-linear-layout} to @samp{in-place}@comma{} usually in a profile of its own (@ref{Profiles, , Profiles})@comma{} syncs TODO headings wherever they already are@comma{} across many files@comma{} with Org as the primary copy. A heading is linked to its issue by its @samp{LINEAR_UUID} property.
+
+@vindex org-linear-directories
+@vindex org-linear-exclude-files
+@vindex org-linear-exclude-tags
+@vindex org-linear-exclude-keywords
+The headings synced are the open TODO headings in the @samp{.org} files under @code{org-linear-directories}@comma{} searched recursively@comma{} except those in files matching a regexp of @code{org-linear-exclude-files}@comma{} those with a tag in @code{org-linear-exclude-tags} (inherited tags count)@comma{} those with a keyword in @code{org-linear-exclude-keywords}@comma{} and habits. Exclusions apply to linked headings too: a linked heading that becomes excluded stops syncing@comma{} and its issue is left as it is. A linked heading you close in Org still sends its closing.
+
+What a sync does:
+
+@itemize
+@item
+It reads only the files that changed since the last sync@comma{} and fetches only the issues that changed in Linear since then.
+@item
+A new heading in scope gets an issue. Before anything is sent@comma{} the heading gets the issue's ID as @samp{LINEAR_PENDING_UUID} and its file is saved@comma{} so an answer lost on the way back is found by the next sync rather than repeated. At most @code{org-linear-create-limit} issues are created per sync@comma{} so a first import spreads over several. Each issue gets a label @samp{file:NAME} naming the file its heading is in@comma{} created in Linear when missing.
+@item
+Changes on either side are merged field by field@comma{} as in the mirror layout. When a field changed on both sides@comma{} @code{org-linear-conflict-winner} decides: set it to @samp{org} for this layout@comma{} and Linear's value goes to the sync log.
+@item
+An issue created in Linear goes under the heading @code{org-linear-inbox-heading} of @code{org-linear-inbox-file}. Refile it anywhere in scope and it keeps syncing.
+@item
+An issue closed in Linear sets its heading's done keyword; the heading stays. A heading with a repeater repeats instead@comma{} once for each time the issue was closed: the @samp{LINEAR_REPEATED} property records the closing it acted on.
+@item
+An issue deleted in Linear cancels its heading@comma{} which keeps its text and loses its link@comma{} so it is not created again.
+@item
+A linked heading that is no longer in any file under @code{org-linear-directories} (deleted@comma{} or moved out) archives its issue in Linear. A heading moved to an @samp{_archive} file still counts as present. If more than @code{org-linear-archive-limit} issues would be archived at once@comma{} as when a directory leaves the option@comma{} none is@comma{} and the log says why.
+@item
+A file with unsaved edits is skipped@comma{} and so is one edited while the sync runs: its headings neither pull nor push until it is saved. A buffer whose file changed on disk is reverted first if it has no unsaved edits. The sync never deletes heading text.
+@item
+Several keywords can stand for one Linear state@comma{} through @code{org-linear-keyword-states}; a heading keeps its keyword while its issue stays in that state. A keyword with no state is sent as the team's first unstarted state@comma{} or first completed one for a done keyword; a state whose keyword Org lacks arrives as Org's first open or done keyword.
+@item
+Assignees are left alone.
+@end itemize
+
+@vindex org-linear-merge-body-function
+A description edited in Linear replaces the heading's body when the body survives a conversion to Markdown and back unchanged. When it does not@comma{} because of markup Markdown cannot hold@comma{} such as a source block's header arguments@comma{} @code{org-linear-merge-body-function} merges the two: it gets the Org body@comma{} the Markdown of the last sync@comma{} Linear's new Markdown and a callback@comma{} and calls the callback with the merged Org body@comma{} or @samp{nil}. The result is used only if it converts to Linear's text. Otherwise@comma{} or when the option is @samp{nil}@comma{} the body stays@comma{} the log says why@comma{} and the next sync tries again. A model makes a good merge function.
+
+@findex org-linear-preview
+@samp{M-x org-linear-preview} lists@comma{} per file@comma{} the headings the next sync would create@comma{} and the files it would skip@comma{} without sending or writing anything. Run it before the first sync.
+
+A configuration might look like this:
+
+@lisp
+(setq org-linear-profiles
+      '((personal :layout in-place
+                  :teams ("ME")
+                  :directories ("~/notes")
+                  :exclude-files ("/checklists\\.org\\'")
+                  :exclude-tags ("noexport")
+                  :exclude-keywords ("PROJECT")
+                  :inbox-file "~/notes/inbox.org"
+                  :conflict-winner org
+                  :api-key-command ("my-password-tool" "read" "linear-personal"))))
+@end lisp
+
+@vindex org-linear-create-limit
+@vindex org-linear-archive-limit
+@vindex org-linear-inbox-file
+@vindex org-linear-inbox-heading
+@vindex org-linear-conflict-winner
 
 @node Limits
 @chapter Limits
