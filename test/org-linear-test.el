@@ -9,6 +9,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'org-linear)
+(require 'org-linear-in-place)
 
 ;;;; The fake Linear
 
@@ -23,6 +24,22 @@
 
 (defvar org-linear-test--refuse-next nil
   "Non-nil makes the next edit check report a newer edit.")
+
+(defvar org-linear-test--rewrite-descriptions nil
+  "Non-nil makes the fake Linear rewrite descriptions as the real one does.
+Linear stores a description it is sent in its own Markdown style: a bare
+URL becomes [URL](<URL>), a \"- \" bullet a \"* \" one, and trailing
+spaces go (observed on 2026-11-13).")
+
+(defun org-linear-test--linear-markdown (md)
+  "Return MD as the real Linear stores it, as far as the fake knows."
+  (let ((md (replace-regexp-in-string "[ \t]+$" "" md)))
+    (setq md (replace-regexp-in-string "^\\([ \t]*\\)- " "\\1* " md))
+    (setq md (replace-regexp-in-string "\\[\\([^]]+\\)\\](\\(https?://[^)>]+\\))" "[\\1](<\\2>)" md))
+    (replace-regexp-in-string "\\(?:^\\|[ (]\\)\\(https?://[^ \t\n)<>]+\\)"
+                              (lambda (m) (replace-regexp-in-string
+                                           "https?://.*" (lambda (u) (format "[%s](<%s>)" u u)) m t t))
+                              md t t)))
 
 (defvar org-linear-test--lose-next nil
   "Name of an operation whose next answer is lost on the way back.
@@ -243,7 +260,10 @@ A string is an error message."
       (let ((value (if (eq value :null) nil value)))
         (pcase key
           ('title (setf (alist-get 'title issue) value))
-          ('description (setf (alist-get 'description issue) value))
+          ('description (setf (alist-get 'description issue)
+                              (if (and value org-linear-test--rewrite-descriptions)
+                                  (org-linear-test--linear-markdown value)
+                                value)))
           ('stateId (setf (alist-get 'state issue) (org-linear-test--state value)))
           ('priority (setf (alist-get 'priority issue) value))
           ('dueDate (setf (alist-get 'dueDate issue) value))
@@ -2160,33 +2180,42 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (should (string-match-p "Call \\*after\\* lunch\\." (org-linear-test--note "health.org"))))))
 
 (ert-deftest org-linear-test-in-place-lossy-body-merged-or-held ()
-  "A Linear edit to a body with Org-only markup is merged, or held when the merge fails."
+  "A Linear edit to a body with Org-only markup is merged, or held, and a held text is not retried."
   (org-linear-test--with-notes
       '(("code.org" . "* TODO Fix script\n#+begin_src emacs-lisp :tangle yes\n(foo)\n#+end_src\n"))
     (org-linear-test--sync)
     (let ((id (alist-get 'id (org-linear-test--issue-titled "Fix script")))
           (header "#+begin_src emacs-lisp :tangle yes")
-          (merged "#+begin_src emacs-lisp :tangle yes\n(bar)\n#+end_src"))
+          (calls 0))
       (org-linear-test--edit id 'description "``` commonlisp\n(bar)\n```")
       (org-linear-test--sync)
       (should (string-match-p "(foo)" (org-linear-test--note "code.org")))
       (should (string-match-p "set `org-linear-merge-body-function'" (org-linear-test--log)))
       (let ((org-linear-merge-body-function
-             (lambda (_org _old _new callback) (funcall callback "Something else."))))
+             (lambda (_org _old _new callback) (cl-incf calls) (funcall callback "Something else."))))
         (org-linear-test--sync)
+        (should (= calls 0))
+        (org-linear-test--edit id 'description "``` commonlisp\n(baz)\n```")
+        (org-linear-test--sync)
+        (org-linear-test--sync)
+        (should (= calls 1))
         (should (string-match-p "(foo)" (org-linear-test--note "code.org")))
-        (should (string-match-p "does not match" (org-linear-test--log))))
+        (should (string-match-p "does not say what Linear's text says" (org-linear-test--log))))
       (let ((org-linear-merge-body-function
              (lambda (org old new callback)
+               (cl-incf calls)
                (should (string-match-p (regexp-quote header) org))
                (should (string-match-p "(foo)" old))
-               (should (string-match-p "(bar)" new))
-               (funcall callback merged))))
+               (should (string-match-p "(qux)" new))
+               (funcall callback "#+begin_src emacs-lisp :tangle yes\n(qux)\n#+end_src"))))
+        (org-linear-test--edit id 'description "``` commonlisp\n(qux)\n```")
         (org-linear-test--sync)
-        (should (string-match-p (regexp-quote merged) (org-linear-test--note "code.org"))))
+        (should (= calls 2))
+        (should (string-match-p (regexp-quote "#+begin_src emacs-lisp :tangle yes\n(qux)\n#+end_src")
+                                (org-linear-test--note "code.org"))))
       (org-linear-test--sync)
       (should-not (org-linear-test--writes))
-      (should (string-match-p (regexp-quote merged) (org-linear-test--note "code.org"))))))
+      (should (string-match-p "(qux)" (org-linear-test--note "code.org"))))))
 
 (ert-deftest org-linear-test-in-place-lost-create-not-repeated ()
   "A create whose answer was lost is linked by the next sync, not made twice."
@@ -2250,6 +2279,117 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (org-linear-test--sync)
       (org-linear-test--sync)
       (should (string-match-p "^\\* TODO \\[#7\\] Minor task" (org-linear-test--note "work.org"))))))
+
+(ert-deftest org-linear-test-in-place-first-import-not-in-background ()
+  "A background sync does not make the first in-place import; a manual one does."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (setq org-linear-test--calls nil)
+    (org-linear--timer-sync)
+    (should-not org-linear--busy)
+    (should-not org-linear-test--calls)
+    (should (string-match-p "first in-place import" (org-linear-test--log)))
+    (org-linear-test--sync)
+    (should (org-linear-test--issue-titled "Book dentist"))
+    (org-linear-test--write-note
+     "health.org" (concat (org-linear-test--note "health.org") "** TODO Later task\n"))
+    (org-linear--timer-sync)
+    (let ((deadline (+ (float-time) 30)))
+      (while (and org-linear--busy (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (org-linear-test--issue-titled "Later task"))))
+
+(ert-deftest org-linear-test-in-place-candidates-need-real-keywords ()
+  "A file whose headings only start with capitalized words is not a candidate."
+  (org-linear-test--with-notes '(("prose.org" . "* AI safety\n* Big Ideas\n") ("todo.org" . "* TODO Real\n"))
+    (let ((case-fold-search t))
+      (should-not (plist-get (org-linear-in-place--read-file
+                              (expand-file-name "prose.org" org-linear-test--notes) nil nil)
+                             :candidates))
+      (should (plist-get (org-linear-in-place--read-file
+                          (expand-file-name "todo.org" org-linear-test--notes) nil nil)
+                         :candidates)))))
+
+(ert-deftest org-linear-test-in-place-linear-rewrite-is-not-an-edit ()
+  "Linear's rewrite of a description it was sent changes no heading."
+  (let ((org-linear-test--rewrite-descriptions t))
+    (org-linear-test--with-notes
+        '(("links.org" . "* TODO Read up\nSee https://example.org/a and [[https://example.com][x]].\n- one  \n- two\nLine one\nline two\n"))
+      (org-linear-test--sync)
+      (let ((issue (org-linear-test--issue-titled "Read up"))
+            (text (org-linear-test--note "links.org")))
+        (should (string-match-p "(<https://example.org/a>)" (alist-get 'description issue)))
+        (org-linear-test--sync)
+        (org-linear-test--sync)
+        (should (equal text (org-linear-test--note "links.org")))
+        (should-not (org-linear-test--writes))
+        (should (string-match-p "^Line one\nline two$" (org-linear-test--note "links.org")))
+        (should-not (string-match-p "Held back" (org-linear-test--log)))))))
+
+(ert-deftest org-linear-test-mirror-linear-rewrite-is-not-an-edit ()
+  "In the mirror layout too, a new issue's body is not replaced by Linear's rewrite."
+  (let ((org-linear-test--rewrite-descriptions t))
+    (org-linear-test--with-board
+      (org-linear-test--sync)
+      (with-current-buffer (find-buffer-visiting org-linear-file)
+        (goto-char (point-min))
+        (re-search-forward "^\\* Project A")
+        (org-end-of-subtree t t)
+        (insert "** TODO Fresh one\nSee https://example.org/b\n- first  \n- second\n")
+        (save-buffer))
+      (org-linear-test--sync)
+      (let ((text (org-linear-test--text)))
+        (should (string-match-p "See https://example.org/b\n- first\\s-*\n- second" text))
+        (org-linear-test--sync)
+        (should (equal text (org-linear-test--text)))
+        (should-not (org-linear-test--writes))))))
+
+(ert-deftest org-linear-test-profiles-nested-see-live-state ()
+  "A profile entered again inside another one sees, and keeps, its live state."
+  (let ((org-linear-profiles '((work :teams ("W")) (home :teams ("H"))))
+        (org-linear--profile-states (make-hash-table :test #'eq))
+        (org-linear--busy nil)
+        inner)
+    (org-linear--with-profile 'work
+      (setq org-linear--busy 'running)
+      (org-linear--with-profile nil
+        (should-not org-linear--busy)
+        (setq org-linear--busy 'default-busy)
+        (org-linear--with-profile 'work
+          (setq inner org-linear--busy)
+          (setq org-linear--pending t)))
+      (should (eq org-linear--busy 'running))
+      (should (eq org-linear--pending t)))
+    (should (eq inner 'running))
+    (should (eq org-linear--busy 'default-busy))
+    (should (eq (org-linear--with-profile 'work org-linear--busy) 'running))))
+
+(ert-deftest org-linear-test-in-place-profile-claims-no-file ()
+  "An in-place profile that inherits `org-linear-file' does not sync on visiting it."
+  (org-linear-test--with-board
+    (let ((org-linear-profiles '((notes :layout in-place :teams ("ENG"))))
+          (org-linear--profile-states (make-hash-table :test #'eq))
+          synced)
+      (org-linear-test--sync)
+      (cl-letf (((symbol-function 'org-linear-sync)
+                 (lambda (&rest _) (push org-linear--profile synced))))
+        (with-current-buffer (find-buffer-visiting org-linear-file)
+          (org-linear--maybe-enable-file-mode)))
+      (should (equal synced '(nil))))))
+
+(ert-deftest org-linear-test-in-place-file-indexed-once ()
+  "A file reached under two names is indexed once."
+  (org-linear-test--with-notes '(("work.org" . "* TODO Only once\n"))
+    (let* ((link (expand-file-name "alias" org-linear-test--dir))
+           (scan (list :present (make-hash-table :test #'equal) :tasks (make-hash-table :test #'equal)
+                       :new nil :pending (make-hash-table :test #'equal)
+                       :duplicates (make-hash-table :test #'equal) :buffers nil :opened nil
+                       :skipped (make-hash-table :test #'equal))))
+      (make-symbolic-link org-linear-test--notes link)
+      (org-linear--load-state)
+      (org-linear-in-place--index-file (expand-file-name "work.org" org-linear-test--notes) scan)
+      (org-linear-in-place--index-file (expand-file-name "work.org" link) scan)
+      (should (= 1 (length (plist-get scan :new))))
+      (dolist (buffer (plist-get scan :opened)) (kill-buffer buffer)))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

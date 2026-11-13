@@ -444,9 +444,9 @@ What a sync does:
 
 @itemize
 @item
-It reads only the files that changed since the last sync@comma{} and fetches only the issues that changed in Linear since then.
+It reads only the files that changed since the last sync@comma{} and fetches only the issues that changed in Linear since then. The first sync reads every file and opens those with TODO headings@comma{} which can take some seconds@comma{} so background syncs never make it: start it with @samp{M-x org-linear-sync}.
 @item
-A new heading in scope gets an issue. Before anything is sent@comma{} the heading gets the issue's ID as @samp{LINEAR_PENDING_UUID} and its file is saved@comma{} so an answer lost on the way back is found by the next sync rather than repeated. At most @code{org-linear-create-limit} issues are created per sync@comma{} so a first import spreads over several. Each issue gets a label @samp{file:NAME} naming the file its heading is in@comma{} created in Linear when missing.
+A new heading in scope gets an issue. Before anything is sent@comma{} the heading gets the issue's ID as @samp{LINEAR_PENDING_UUID} and its file is saved@comma{} so an answer lost on the way back is found by the next sync rather than repeated. At most @code{org-linear-create-limit} issues are created per sync@comma{} and the rest wait for the next scheduled sync rather than an immediate one@comma{} so a first import spreads over several and keeps within Linear's hourly request limit. Each issue gets a label @samp{file:NAME} naming the file its heading is in@comma{} created in Linear when missing.
 @item
 Changes on either side are merged field by field@comma{} as in the mirror layout. When a field changed on both sides@comma{} @code{org-linear-conflict-winner} decides: set it to @samp{org} for this layout@comma{} and Linear's value goes to the sync log.
 @item
@@ -466,7 +466,9 @@ Assignees are left alone.
 @end itemize
 
 @vindex org-linear-merge-body-function
-A description edited in Linear replaces the heading's body when the body survives a conversion to Markdown and back unchanged. When it does not@comma{} because of markup Markdown cannot hold@comma{} such as a source block's header arguments@comma{} @code{org-linear-merge-body-function} merges the two: it gets the Org body@comma{} the Markdown of the last sync@comma{} Linear's new Markdown and a callback@comma{} and calls the callback with the merged Org body@comma{} or @samp{nil}. The result is used only if it converts to Linear's text. Otherwise@comma{} or when the option is @samp{nil}@comma{} the body stays@comma{} the log says why@comma{} and the next sync tries again. A model makes a good merge function.
+Linear rewrites the Markdown it is sent in its own style (bare links become @samp{[URL](<URL>)}@comma{} @samp{-} bullets become @samp{*}@comma{} trailing spaces go)@comma{} so the sync records the description as Linear stored it@comma{} in both layouts; the rewrite is never taken for an edit made in Linear.
+
+A description edited in Linear replaces the heading's body when Linear's stored text of the old description converts back to exactly that body@comma{} so that the conversion loses nothing. Otherwise@comma{} because of markup Markdown cannot hold@comma{} such as a source block's header arguments@comma{} @code{org-linear-merge-body-function} merges the two: it gets the Org body@comma{} the Markdown of the last sync@comma{} Linear's new Markdown and a callback@comma{} and calls the callback with the merged Org body@comma{} or @samp{nil}. The result is used only if it says what Linear's text says@comma{} compared as Org. Otherwise@comma{} or when the option is @samp{nil}@comma{} the body stays and the log says why; that Linear text is not merged again@comma{} but a later edit on either side is. A model makes a good merge function.
 
 @findex org-linear-preview
 @samp{M-x org-linear-preview} lists@comma{} per file@comma{} the headings the next sync would create@comma{} and the files it would skip@comma{} without sending or writing anything@comma{} and closes again the files it had to open. Run it before the first sync.

@@ -45,10 +45,35 @@
 (defconst org-linear-in-place--file-regexp "\\.org\\(?:_archive\\)?\\'"
   "Regexp matching the names of the files the scan reads.")
 
-(defconst org-linear-in-place--candidate-regexp
-  "^\\*+ +[[:upper:]]+ \\|^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:"
-  "Regexp that a file holding a TODO heading or a linked one matches.
-It matches more than that, which costs only a visit.")
+(defvar org-linear-in-place--candidate-cache nil
+  "The value of `org-todo-keywords' and the candidate regexp built from it.")
+
+(defun org-linear-in-place--candidate-regexp ()
+  "Return a regexp that a file holding a heading the scan must index matches.
+That is an open TODO heading, by the keywords of `org-todo-keywords', a
+linked heading, or a line that sets the file's own keywords.  Excluded
+keywords and headings are left out later, when the file is indexed."
+  (let ((keywords (default-value 'org-todo-keywords)))
+    (unless (eq (car org-linear-in-place--candidate-cache) keywords)
+      (setq org-linear-in-place--candidate-cache
+            (cons keywords (org-linear-in-place--build-candidate-regexp))))
+    (cdr org-linear-in-place--candidate-cache)))
+
+(defun org-linear-in-place--build-candidate-regexp ()
+  "Build the regexp of `org-linear-in-place--candidate-regexp'."
+  (concat "^\\*+ +" (regexp-opt (org-linear-in-place--open-keywords) t) "\\(?: \\|$\\)"
+          "\\|^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:"
+          "\\|^#\\+\\(?:SEQ_\\|TYP_\\)?TODO:"))
+
+(defun org-linear-in-place--open-keywords ()
+  "Return the open TODO keywords of the default value of `org-todo-keywords'."
+  (seq-mapcat (lambda (sequence)
+                (let ((keywords (mapcar (lambda (kw) (replace-regexp-in-string "(.*)\\'" "" kw))
+                                        (cdr sequence))))
+                  (if (member "|" keywords)
+                      (seq-take-while (lambda (kw) (not (equal kw "|"))) keywords)
+                    (butlast keywords))))
+              (default-value 'org-todo-keywords)))
 
 (defun org-linear-in-place--scan ()
   "Read the files and return the sync's view of them, a plist.
@@ -139,7 +164,8 @@ creations in flight, so that their issues count as present."
       (insert-file-contents file))
     (goto-char (point-min))
     (let ((candidates (save-excursion
-                        (re-search-forward org-linear-in-place--candidate-regexp nil t)))
+                        (let ((case-fold-search nil))
+                          (re-search-forward (org-linear-in-place--candidate-regexp) nil t))))
           uuids)
       (while (re-search-forward "^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:[ \t]+\\(\\S-+\\)" nil t)
         (push (match-string-no-properties 1) uuids))
@@ -147,9 +173,10 @@ creations in flight, so that their issues count as present."
 
 (defun org-linear-in-place--index-file (file scan)
   "Visit FILE and add its headings to SCAN, unless it cannot be edited now.
-Return its buffer, or nil."
-  (or (car (seq-find (lambda (pair) (equal (cdr pair) file))
-                     (mapcar (lambda (b) (cons b (buffer-file-name b))) (plist-get scan :buffers))))
+Return its buffer, or nil.  A file already indexed, under whatever name,
+is not indexed again, so that no heading is counted twice."
+  (or (when-let* ((visiting (find-buffer-visiting file)))
+        (car (memq visiting (plist-get scan :buffers))))
       (when-let* ((buffer (org-linear-in-place--usable-buffer file scan)))
         (with-current-buffer buffer
           (org-with-wide-buffer
@@ -173,9 +200,7 @@ reverted first.  A buffer the sync visits itself is recorded in SCAN."
             (revert-buffer t t t))))
       buffer)
      (t
-      (setq buffer (let ((inhibit-message t)
-                         (delay-mode-hooks t))
-                     (find-file-noselect file)))
+      (setq buffer (org-linear-in-place--visit file))
       (with-current-buffer buffer
         (unless (derived-mode-p 'org-mode) (org-mode)))
       (plist-put scan :opened (cons buffer (plist-get scan :opened)))
@@ -362,57 +387,78 @@ Each is (ID MARKER BASE MD); CONVERTED holds the converted descriptions."
 
 (defun org-linear-in-place--merge-bodies (pulls callback)
   "Decide how each of PULLS reaches Org, one after another, then CALLBACK.
-A body that survives a round trip through Markdown is pulled as pandoc
-converts it.  Another is merged by `org-linear-merge-body-function', or
-held back."
+Linear's edit is pulled as pandoc converts it when Linear's stored text
+of the old description converts back to exactly the Org body: then the
+conversion loses nothing.  Otherwise `org-linear-merge-body-function'
+merges it, or it is held back.  A Linear text held back once is not
+merged again; a later edit on either side is."
   (if (null pulls)
       (funcall callback)
     (pcase-let ((`(,id ,marker ,base ,md) (car pulls))
                 (next (lambda () (org-linear-in-place--merge-bodies (cdr pulls) callback))))
-      (let ((body (org-linear-in-place--body-at marker)))
-        (org-linear-in-place--round-trip
-         body
-         (lambda (back)
-           (if (org-linear-in-place--same-text-p back body)
-               (funcall next)
-             (org-linear-in-place--merge-body id body base md next))))))))
-
-(defun org-linear-in-place--round-trip (org callback)
-  "Convert ORG to Markdown and back, then call CALLBACK with the result."
-  (org-linear--org-to-md
-   org
-   (lambda (md)
-     (org-linear--md-to-org (list (cons 'back md))
-                            (lambda (table) (funcall callback (gethash 'back table)))))))
+      (let ((body (org-linear-in-place--body-at marker))
+            (old-md (cdr (org-linear--split-description (plist-get base :desc-md)))))
+        (if (equal (plist-get base :held-md) md)
+            (progn (puthash id :hold org-linear--body-overrides)
+                   (funcall next))
+          (org-linear--md-to-org
+           (list (cons 'old old-md))
+           (lambda (table)
+             (if (org-linear-in-place--same-text-p (gethash 'old table) body)
+                 (funcall next)
+               (org-linear-in-place--merge-body id body base old-md md next)))))))))
 
 (defun org-linear-in-place--same-text-p (a b)
+  "Return non-nil if A and B differ at most in trailing whitespace."
+  (equal (org-linear-in-place--trim-lines a) (org-linear-in-place--trim-lines b)))
+
+(defun org-linear-in-place--trim-lines (text)
+  "Return TEXT without trailing whitespace on its lines or around it."
+  (string-trim (replace-regexp-in-string "[ \t]+$" "" (or text ""))))
+
+(defun org-linear-in-place--same-content-p (a b)
   "Return non-nil if A and B differ only in whitespace."
   (equal (org-linear--note-key (or a "")) (org-linear--note-key (or b ""))))
 
-(defun org-linear-in-place--merge-body (id body base md next)
+(defun org-linear-in-place--merge-body (id body base old-md md next)
   "Merge Linear's description MD of issue ID into the Org BODY, then call NEXT.
-BASE is the issue's state at the last sync.  A merge that does not
-convert back to MD is not used, and the body is held back until a later
-sync merges it."
+BASE is the issue's state at the last sync and OLD-MD its description
+then.  The merge is used only if it says, in Org, what MD says; if not,
+or if the merge fails, the body is held back and MD is recorded, so that
+it is not sent to the model again."
   (let ((hold (lambda (reason)
                 (org-linear--log "Held back %s's description edit from Linear: %s" id reason)
+                (puthash id (plist-put (copy-sequence base) :held-md md) (org-linear--state-tasks))
                 (puthash id :hold org-linear--body-overrides)
                 (funcall next))))
     (if (not org-linear-merge-body-function)
         (funcall hold "the Org body has markup Markdown lacks; set `org-linear-merge-body-function'")
       (funcall org-linear-merge-body-function
-               body (cdr (org-linear--split-description (plist-get base :desc-md))) md
+               body old-md md
                (org-linear--bound
                 (lambda (merged)
                   (if (not (stringp merged))
                       (funcall hold "the merge failed")
-                    (org-linear--org-to-md
-                     merged
-                     (lambda (merged-md)
-                       (if (org-linear-in-place--same-text-p merged-md md)
+                    (org-linear-in-place--check-merge
+                     merged md
+                     (lambda (ok)
+                       (if ok
                            (progn (puthash id (string-trim merged) org-linear--body-overrides)
                                   (funcall next))
-                         (funcall hold "the merge does not match Linear's text")))))))))))
+                         (funcall hold "the merge does not say what Linear's text says")))))))))))
+
+(defun org-linear-in-place--check-merge (merged md callback)
+  "Call CALLBACK with non-nil if the Org text MERGED says what Markdown MD says.
+Both are compared as Org, as pandoc reads them, so that differences of
+Markdown style between pandoc and Linear do not count."
+  (org-linear--org-to-md
+   merged
+   (lambda (merged-md)
+     (org-linear--md-to-org
+      (list (cons 'merged merged-md) (cons 'linear md))
+      (lambda (table)
+        (funcall callback (org-linear-in-place--same-content-p
+                           (gethash 'merged table) (gethash 'linear table))))))))
 
 ;;;; Applying
 
@@ -599,16 +645,16 @@ archive none."
 (defun org-linear-in-place--creation-ops (scan)
   "Return edits that create issues for the new headings in SCAN.
 At most `org-linear-create-limit' are created; the rest wait for the next
-sync.  Each heading gets the ID of its issue as LINEAR_PENDING_UUID
-before anything is sent, and its file is saved, so that a lost answer is
-found again rather than repeated."
+scheduled sync, not an immediate rerun, so that a large import keeps to
+Linear's hourly request limit.  Each heading gets the ID of its issue
+as LINEAR_PENDING_UUID before anything is sent, and its file is saved,
+so that a lost answer is found again rather than repeated."
   (let* ((new (plist-get scan :new))
          (now (seq-take new org-linear-create-limit))
          ops)
     (when (nthcdr org-linear-create-limit new)
-      (org-linear--log "Created %d of %d new headings; the rest follow in the next syncs"
-                       org-linear-create-limit (length new))
-      (setq org-linear--rerun t))
+      (org-linear--log "Creating %d of %d new headings; the rest follow in the next syncs"
+                       org-linear-create-limit (length new)))
     (dolist (marker now)
       (let* ((view (org-linear--local-view marker))
              (pending (or (org-entry-get marker "LINEAR_PENDING_UUID")
@@ -631,7 +677,8 @@ found again rather than repeated."
 PLACE is a plist with the heading's :file and :pending ID.  A heading
 whose file has unsaved edits is linked by a later sync."
   (let ((base (append (copy-sequence view)
-                      (list :desc-md md :edited (alist-get 'last_edited_time task)
+                      (list :desc-md (org-linear--stored-description task md)
+                            :edited (alist-get 'last_edited_time task)
                             :comment-ids nil :note-keys nil))))
     (puthash (alist-get 'id task) base (org-linear--state-tasks))
     (org-linear--save-state)
@@ -651,8 +698,7 @@ whose file has unsaved edits is linked by a later sync."
 Nothing happens if FILE's buffer has unsaved edits; a buffer visited for
 this is killed afterwards."
   (let* ((visiting (find-buffer-visiting file))
-         (buffer (or visiting (let ((inhibit-message t) (delay-mode-hooks t))
-                                (find-file-noselect file)))))
+         (buffer (or visiting (org-linear-in-place--visit file))))
     (if (buffer-modified-p buffer)
         (org-linear--log "Not linked yet: %s has unsaved edits" (abbreviate-file-name file))
       (with-current-buffer buffer
@@ -664,6 +710,19 @@ this is killed afterwards."
         (org-linear--save buffer)
         (org-linear-in-place--refresh-cache buffer))
       (unless visiting (kill-buffer buffer)))))
+
+;;;; Visiting files
+
+(defun org-linear-in-place--visit (file)
+  "Visit FILE for the sync and return its buffer.
+The sync kills the buffer when done, so the hooks that set up a buffer
+for editing, version control included, are skipped: a first import
+visits a hundred files or more."
+  (let ((inhibit-message t)
+        (delay-mode-hooks t)
+        (find-file-hook nil)
+        (vc-handled-backends nil))
+    (find-file-noselect file)))
 
 ;;;; The inbox
 

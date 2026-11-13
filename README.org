@@ -355,8 +355,8 @@ The headings synced are the open TODO headings in the =.org= files under ~org-li
 
 What a sync does:
 
-- It reads only the files that changed since the last sync, and fetches only the issues that changed in Linear since then.
-- A new heading in scope gets an issue. Before anything is sent, the heading gets the issue's ID as =LINEAR_PENDING_UUID= and its file is saved, so an answer lost on the way back is found by the next sync rather than repeated. At most ~org-linear-create-limit~ issues are created per sync, so a first import spreads over several. Each issue gets a label =file:NAME= naming the file its heading is in, created in Linear when missing.
+- It reads only the files that changed since the last sync, and fetches only the issues that changed in Linear since then. The first sync reads every file and opens those with TODO headings, which can take some seconds, so background syncs never make it: start it with =M-x org-linear-sync=.
+- A new heading in scope gets an issue. Before anything is sent, the heading gets the issue's ID as =LINEAR_PENDING_UUID= and its file is saved, so an answer lost on the way back is found by the next sync rather than repeated. At most ~org-linear-create-limit~ issues are created per sync, and the rest wait for the next scheduled sync rather than an immediate one, so a first import spreads over several and keeps within Linear's hourly request limit. Each issue gets a label =file:NAME= naming the file its heading is in, created in Linear when missing.
 - Changes on either side are merged field by field, as in the mirror layout. When a field changed on both sides, ~org-linear-conflict-winner~ decides: set it to =org= for this layout, and Linear's value goes to the sync log.
 - An issue created in Linear goes under the heading ~org-linear-inbox-heading~ of ~org-linear-inbox-file~. Refile it anywhere in scope and it keeps syncing.
 - An issue closed in Linear sets its heading's done keyword; the heading stays. A heading with a repeater repeats instead, once for each time the issue was closed: the =LINEAR_REPEATED= property records the closing it acted on.
@@ -367,7 +367,9 @@ What a sync does:
 - Assignees are left alone.
 
 #+vindex: org-linear-merge-body-function
-A description edited in Linear replaces the heading's body when the body survives a conversion to Markdown and back unchanged. When it does not, because of markup Markdown cannot hold, such as a source block's header arguments, ~org-linear-merge-body-function~ merges the two: it gets the Org body, the Markdown of the last sync, Linear's new Markdown and a callback, and calls the callback with the merged Org body, or =nil=. The result is used only if it converts to Linear's text. Otherwise, or when the option is =nil=, the body stays, the log says why, and the next sync tries again. A model makes a good merge function.
+Linear rewrites the Markdown it is sent in its own style (bare links become =[URL](<URL>)=, =-= bullets become =*=, trailing spaces go), so the sync records the description as Linear stored it, in both layouts; the rewrite is never taken for an edit made in Linear.
+
+A description edited in Linear replaces the heading's body when Linear's stored text of the old description converts back to exactly that body, so that the conversion loses nothing. Otherwise, because of markup Markdown cannot hold, such as a source block's header arguments, ~org-linear-merge-body-function~ merges the two: it gets the Org body, the Markdown of the last sync, Linear's new Markdown and a callback, and calls the callback with the merged Org body, or =nil=. The result is used only if it says what Linear's text says, compared as Org. Otherwise, or when the option is =nil=, the body stays and the log says why; that Linear text is not merged again, but a later edit on either side is. A model makes a good merge function.
 
 #+findex: org-linear-preview
 =M-x org-linear-preview= lists, per file, the headings the next sync would create, and the files it would skip, without sending or writing anything, and closes again the files it had to open. Run it before the first sync.

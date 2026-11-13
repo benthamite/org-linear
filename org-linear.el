@@ -400,7 +400,10 @@ Nil is the default profile, whose options are the global ones.")
   "Name of the profile the current buffer belongs to, or nil for the default.")
 
 (defvar org-linear--profile-states (make-hash-table :test #'eq)
-  "Hash table from profile name to its saved state, an alist (VARIABLE . VALUE).")
+  "Hash table from profile name to its state, an alist (VARIABLE . VALUE).
+The key nil is the default profile.  A profile's entry is written each
+time Emacs leaves it for another profile and read each time it returns,
+so that a profile entered again inside another one sees its live state.")
 
 (defvar org-linear--timers nil
   "Alist from profile name to the timer of `org-linear-auto-sync-mode'.")
@@ -421,45 +424,49 @@ Nil is the default profile, whose options are the global ones.")
                                         (get 'org-linear 'custom-group))))))
 
 (defvar org-linear--outer-values nil
-  "Alist of the values the profile variables had outside any profile.
+  "Alist of the user options as they are outside any profile.
 Bound while a profile other than the default is in effect, so that
 switching to another profile, or back to the default, starts from them.")
 
 (defun org-linear--call-with-profile (name function)
   "Call FUNCTION with the options and state of profile NAME in effect.
 NAME is a symbol from `org-linear-profiles', or nil for the default
-profile.  The profile's state is saved again when FUNCTION returns or
-exits nonlocally."
+profile.  Switching saves the state of the profile left and loads it
+again afterwards, and saves NAME's state when FUNCTION returns or exits
+nonlocally, so that profiles entered inside one another, as hooks,
+timers and process callbacks can make them, never work on stale copies."
   (if (eq name org-linear--profile)
       (funcall function)
-    (let* ((variables (append (org-linear--option-variables)
-                              org-linear--profile-state-variables))
+    (let* ((current org-linear--profile)
+           (options (org-linear--option-variables))
            (outer (or org-linear--outer-values
                       (mapcar (lambda (variable) (cons variable (symbol-value variable)))
-                              (cons 'org-linear-profiles variables)))))
-      (cl-progv (append '(org-linear--profile org-linear--outer-values) variables)
-          (append (list name outer)
-                  (mapcar (lambda (variable) (org-linear--profile-value name variable outer))
-                          variables))
-        (unwind-protect
-            (funcall function)
-          (org-linear--store-profile-state name))))))
+                              (cons 'org-linear-profiles options)))))
+      (org-linear--store-profile-state current)
+      (unwind-protect
+          (cl-progv (append '(org-linear--profile org-linear--outer-values)
+                            options org-linear--profile-state-variables)
+              (append (list name outer)
+                      (mapcar (lambda (variable) (org-linear--option-value name variable outer))
+                              options)
+                      (mapcar (lambda (variable) (org-linear--state-value name variable))
+                              org-linear--profile-state-variables))
+            (unwind-protect
+                (funcall function)
+              (org-linear--store-profile-state name)))
+        (org-linear--load-profile-state current)))))
 
 (defmacro org-linear--with-profile (name &rest body)
   "Run BODY with the options and state of profile NAME in effect."
   (declare (indent 1) (debug t))
   `(org-linear--call-with-profile ,name (lambda () ,@body)))
 
-(defun org-linear--profile-value (name variable outer)
-  "Return the value VARIABLE has in profile NAME.
-OUTER is an alist of the values outside any profile."
+(defun org-linear--option-value (name variable outer)
+  "Return the value the option VARIABLE has in profile NAME.
+OUTER is an alist of the options outside any profile."
   (let ((global (cdr (assq variable outer))))
     (cond
      ((null name) global)
-     ((memq variable org-linear--profile-state-variables)
-      (let ((saved (assq variable (gethash name org-linear--profile-states))))
-        (cond (saved (cdr saved))
-              ((memq variable '(org-linear--reruns org-linear--agenda-project-width)) 0))))
      ((eq variable 'org-linear--log-buffer) (format "*org-linear: %s*" name))
      (t
       (let* ((options (cdr (org-linear--profile-entry name outer)))
@@ -469,6 +476,12 @@ OUTER is an alist of the values outside any profile."
               ((eq variable 'org-linear-state-file)
                (org-linear--profile-state-file name global))
               (t global)))))))
+
+(defun org-linear--state-value (name variable)
+  "Return the value the state VARIABLE has in profile NAME."
+  (let ((saved (assq variable (gethash name org-linear--profile-states))))
+    (cond (saved (cdr saved))
+          ((memq variable '(org-linear--reruns org-linear--agenda-project-width)) 0))))
 
 (defun org-linear--profile-entry (name outer)
   "Return the entry of profile NAME in `org-linear-profiles' as OUTER has it.
@@ -483,15 +496,15 @@ Signal an error if there is none."
                     (file-name-directory global)))
 
 (defun org-linear--store-profile-state (name)
-  "Save the state variables of profile NAME from their current values.
-The default profile's state lives in the variables themselves, so it
-needs no saving, except when entered from another profile."
-  (let ((values (mapcar (lambda (variable) (cons variable (symbol-value variable)))
-                        org-linear--profile-state-variables)))
-    (if name
-        (puthash name values org-linear--profile-states)
-      (dolist (pair values)
-        (setf (alist-get (car pair) org-linear--outer-values) (cdr pair))))))
+  "Save the state variables of profile NAME from their current values."
+  (puthash name (mapcar (lambda (variable) (cons variable (symbol-value variable)))
+                        org-linear--profile-state-variables)
+           org-linear--profile-states))
+
+(defun org-linear--load-profile-state (name)
+  "Set the state variables to the saved state of profile NAME."
+  (dolist (pair (gethash name org-linear--profile-states))
+    (set (car pair) (cdr pair))))
 
 (defun org-linear--bound (function)
   "Return FUNCTION wrapped to run in the profile in effect now.
@@ -1032,14 +1045,29 @@ project, as `org-linear-set-project' does.
       (run-with-idle-timer 0.5 nil (org-linear--bound #'org-linear-sync)))))
 
 (defun org-linear--timer-sync ()
-  "Sync unless the file has unsaved edits, which a save will send."
-  (let ((buffer (find-buffer-visiting org-linear-file)))
-    (unless (and buffer (buffer-modified-p buffer))
-      (org-linear-sync))))
+  "Sync unless the file has unsaved edits, which a save will send.
+In the in-place layout, a background sync never makes the first import,
+which reads every file and creates many issues: start that one yourself
+with `org-linear-sync'."
+  (let ((buffer (and (not (eq org-linear-layout 'in-place))
+                     (find-buffer-visiting org-linear-file))))
+    (cond
+     ((and buffer (buffer-modified-p buffer)))
+     ((org-linear--first-import-pending-p)
+      (org-linear--log "Not synced in the background: start the first in-place import with M-x org-linear-sync"))
+     (t (org-linear-sync)))))
+
+(defun org-linear--first-import-pending-p ()
+  "Return non-nil if this in-place profile has never completed a sync."
+  (and (eq org-linear-layout 'in-place)
+       (progn (org-linear--load-state)
+              (null (plist-get org-linear--state :since)))))
 
 (defun org-linear--file-p ()
-  "Return non-nil if the current buffer visits `org-linear-file'."
-  (and buffer-file-name
+  "Return non-nil if the current buffer visits `org-linear-file'.
+An in-place profile has no such file, even when it inherits the option."
+  (and (not (eq org-linear-layout 'in-place))
+       buffer-file-name
        (string= (file-name-nondirectory buffer-file-name)
                 (file-name-nondirectory org-linear-file))
        (file-equal-p buffer-file-name org-linear-file)))
@@ -2017,9 +2045,11 @@ too.  The issue exists by now, so a refusal is only logged."
 
 (defun org-linear--link-created-mirror (marker view md task)
   "Record TASK, created from VIEW at MARKER and sent with description MD.
-This is the mirror layout's way."
+This is the mirror layout's way.  The base keeps the description as
+Linear stored it, which Linear rewrites on the way in (link and list
+syntax, trailing spaces), so that the rewrite is not taken for an edit."
   (let ((base (append (copy-sequence view)
-                      (list :desc-md md
+                      (list :desc-md (org-linear--stored-description task md)
                             :edited (alist-get 'last_edited_time task)
                             :comment-ids nil
                             :note-keys (mapcar (lambda (n) (org-linear--note-key (cdr n)))
@@ -2036,6 +2066,10 @@ This is the mirror layout's way."
     (puthash (alist-get 'id task) base (org-linear--state-tasks))
     (org-linear--save-state)
     (org-linear--count :created)))
+
+(defun org-linear--stored-description (task md)
+  "Return the description of TASK as Linear stored it, or MD if TASK has none."
+  (or (alist-get 'description task) md))
 
 (defun org-linear--created-heading (marker title)
   "Return a marker at the heading new issue TITLE was created from, or nil.
