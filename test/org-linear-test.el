@@ -207,14 +207,17 @@ Like Linear, refuse a nil variable, which `json-serialize' sends as {}."
     (when (equal name org-linear-test--lose-next)
       (setq org-linear-test--lose-next nil
             answer 'lost))
-    (run-at-time 0 nil (lambda ()
-                         (cond
-                          ;; As `org-linear--handle-response' treats a timeout.
-                          ((eq answer 'lost)
-                           (org-linear--fail "curl failed (28): Operation timed out"))
-                          ((stringp answer)
-                           (if errback (funcall errback answer) (org-linear--fail "%s" answer)))
-                          (t (funcall callback answer)))))))
+    ;; Guarded as `org-linear--run-process' guards Linear's answers.
+    (run-at-time 0 nil (org-linear--bound
+                        (lambda ()
+                          (org-linear--ending-sync-on-failure
+                            (cond
+                             ;; As `org-linear--handle-response' treats a timeout.
+                             ((eq answer 'lost)
+                              (org-linear--fail "curl failed (28): Operation timed out"))
+                             ((stringp answer)
+                              (if errback (funcall errback answer) (org-linear--fail "%s" answer)))
+                             (t (funcall callback answer)))))))))
 
 (defun org-linear-test--check-serializable (value)
   "Signal an error if the alist VALUE holds a nil, at any depth."
@@ -1319,7 +1322,7 @@ Each mirrors it into its own file, and the default profile has no teams."
   "An error while a failed sync cleans up does not leave it running."
   (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
     (cl-letf (((symbol-function 'org-linear-in-place--flush) (lambda () (error "Flush broke")))
-              ((symbol-function 'org-linear-in-place--apply) (lambda (&rest _) (error "Boom"))))
+              ((symbol-function 'org-linear-in-place--apply-task) (lambda (&rest _) (error "Boom"))))
       (org-linear-test--sync))
     (should-not org-linear--busy)
     (should (string-match-p "Boom" (org-linear-test--log)))
@@ -2577,6 +2580,80 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
         (should (equal (alist-get 'description (gethash id org-linear-test--issues))
                        (format "Call %s." failing)))))))
 
+(ert-deftest org-linear-test-in-place-scan-works-in-slices ()
+  "The scan reads the files in slices: a sync returns before it has read them."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health)
+                                 ("work.org" . "* TODO Write report\n"))
+    (let ((org-linear-in-place--slice 0))
+      (org-linear-sync)
+      (should org-linear--busy)
+      (should-not (plist-get org-linear--scan :read))
+      (let ((deadline (+ (float-time) 30)))
+        (while (and org-linear--busy (< (float-time) deadline))
+          (accept-process-output nil 0.05)))
+      (should-not org-linear--busy)
+      (should (org-linear-test--issue-titled "Book dentist"))
+      (should (org-linear-test--issue-titled "Write report"))
+      (should (org-linear-test--uuid-of "work.org" "Write report")))))
+
+(ert-deftest org-linear-test-in-place-buffer-edited-while-read-left-out ()
+  "A buffer edited while the scan reads it is left out, unedited."
+  (org-linear-test--with-notes
+      `(("many.org" . ,(mapconcat (lambda (n) (format "* TODO Task %d\n" n)) (number-sequence 1 60) "")))
+    (let ((org-linear-in-place--slice 0)
+          (buffer (find-file-noselect (expand-file-name "many.org" org-linear-test--notes)))
+          (edited nil))
+      (cl-letf (((symbol-function 'org-linear-in-place--index-headings)
+                 (let ((index (symbol-function 'org-linear-in-place--index-headings)))
+                   (lambda (job scan count)
+                     (prog1 (funcall index job scan count)
+                       (unless edited
+                         (setq edited t)
+                         (with-current-buffer (plist-get job :buffer)
+                           (goto-char (point-max))
+                           (insert "Mine.\n"))))))))
+        (org-linear-test--sync))
+      (should edited)
+      (should (string-match-p "changed while the sync read it" (org-linear-test--log)))
+      (should-not (org-linear-test--calls "OrgLinearCreate"))
+      (with-current-buffer buffer
+        (should (buffer-modified-p))
+        (should (string-match-p "Mine\\.\n\\'" (buffer-string)))
+        (should-not (string-match-p "LINEAR" (buffer-string)))))))
+
+(ert-deftest org-linear-test-in-place-apply-in-slices-keeps-its-edits ()
+  "Applying in many slices, the sync does not take its own edits for the user's."
+  (org-linear-test--with-hierarchy
+      `(("plan.org" . ,org-linear-test--tree)
+        ("more.org" . ,(mapconcat (lambda (n) (format "* TODO Task %d\n" n)) (number-sequence 1 8) "")))
+    (let ((org-linear-in-place--slice 0))
+      (org-linear-test--sync-until-quiet))
+    (should-not (string-match-p "changed during the sync" (org-linear-test--log)))
+    (should (org-linear-test--property-of "plan.org" "Site" "LINEAR_PROJECT"))
+    (should (org-linear-test--uuid-of "more.org" "Task 8"))))
+
+(ert-deftest org-linear-test-in-place-buffer-saved-during-sync-left-out ()
+  "A buffer edited and saved while the sync waits for Linear is not edited by it."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          (buffer (find-file-noselect (expand-file-name "health.org" org-linear-test--notes))))
+      (org-linear-test--edit id 'title "Changed in Linear")
+      (cl-letf (((symbol-function 'org-linear-in-place--fetch)
+                 (let ((fetch (symbol-function 'org-linear-in-place--fetch)))
+                   (lambda (callback)
+                     (with-current-buffer buffer
+                       (goto-char (point-max))
+                       (insert "** TODO Added meanwhile\n")
+                       (save-buffer))
+                     (funcall fetch callback)))))
+        (org-linear-test--sync))
+      (should (string-match-p "changed during the sync" (org-linear-test--log)))
+      (should-not (string-match-p "Changed in Linear" (org-linear-test--note "health.org")))
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Changed in Linear" (org-linear-test--note "health.org")))
+      (should (org-linear-test--issue-titled "Added meanwhile")))))
+
 (ert-deftest org-linear-test-in-place-refused-create-left-alone ()
   "A heading whose creation Linear refused does not make its file be read again."
   (org-linear-test--with-notes '(("work.org" . "* TODO REJECT this\n"))
@@ -2754,10 +2831,7 @@ own callbacks."
   "A file reached under two names is indexed once."
   (org-linear-test--with-notes '(("work.org" . "* TODO Only once\n"))
     (let* ((link (expand-file-name "alias" org-linear-test--dir))
-           (scan (list :present (make-hash-table :test #'equal) :tasks (make-hash-table :test #'equal)
-                       :new nil :pending (make-hash-table :test #'equal)
-                       :duplicates (make-hash-table :test #'equal) :buffers nil :opened nil
-                       :skipped (make-hash-table :test #'equal))))
+           (scan (org-linear-in-place--new-scan)))
       (make-symbolic-link org-linear-test--notes link)
       (org-linear--load-state)
       (org-linear-in-place--index-file (expand-file-name "work.org" org-linear-test--notes) scan)
@@ -3322,19 +3396,26 @@ DEADLINE: <2026-12-01 Tue>
 
 (ert-deftest org-linear-test-in-place-scan-does-not-search-buffers-per-file ()
   "A scan builds the visiting table once instead of searching per file."
-  (let ((calls 0))
-    (cl-letf (((symbol-function 'org-linear-in-place--files)
-               (lambda () (list "/nonexistent/a.org" "/nonexistent/b.org")))
-              ((symbol-function 'org-linear-in-place--scan-file)
-               (lambda (file _scan _cache)
-                 (should (hash-table-p org-linear-in-place--visiting))
-                 (org-linear-in-place--buffer-visiting file)))
-              ((symbol-function 'find-buffer-visiting)
-               (lambda (&rest _) (cl-incf calls) nil))
-              ((symbol-function 'org-linear-in-place--cache)
-               (lambda () (make-hash-table :test #'equal))))
-      (org-linear-in-place--scan)
-      (should (= calls 0)))))
+  (let ((calls 0)
+        (checked 0)
+        (dir (make-temp-file "org-linear-scan" t)))
+    (unwind-protect
+        (let ((org-linear-directories (list dir)))
+          (dolist (name '("a.org" "b.org"))
+            (with-temp-file (expand-file-name name dir) (insert "* Note\n")))
+          (cl-letf (((symbol-function 'org-linear-in-place--scan-file)
+                     (lambda (file _mtime _scanner)
+                       (cl-incf checked)
+                       (should (hash-table-p org-linear-in-place--visiting))
+                       (org-linear-in-place--buffer-visiting file)))
+                    ((symbol-function 'find-buffer-visiting)
+                     (lambda (&rest _) (cl-incf calls) nil))
+                    ((symbol-function 'org-linear-in-place--cache)
+                     (lambda () (make-hash-table :test #'equal))))
+            (org-linear-in-place--scan)
+            (should (= checked 2))
+            (should (= calls 0))))
+      (delete-directory dir t))))
 
 ;; A sync interrupted by a quit or a throw does not stay busy.
 

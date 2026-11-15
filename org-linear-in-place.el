@@ -130,57 +130,147 @@ killed since the table was built falls back to `find-buffer-visiting'."
         (find-buffer-visiting file)
       buffer)))
 
+(defconst org-linear-in-place--slice 0.02
+  "Seconds of work a step of the scan does before it lets Emacs go on.
+The scan reads thousands of files; done at once, it would block Emacs
+for seconds.  It works in slices this long, and between them Emacs
+handles input and timers.")
+
+(defconst org-linear-in-place--pause 0.01
+  "Seconds the scan waits between two of its slices.")
+
 (defun org-linear-in-place--scan ()
-  "Read the files and return the sync's view of them, a plist.
+  "Read the files and return the sync's view of them, a plist, at once.
+This is the scan of `org-linear-in-place--scan-async' run to its end
+without pause; `org-linear-preview' uses it."
+  (let ((scanner (org-linear-in-place--scanner)))
+    (while (org-linear-in-place--scan-step scanner))
+    (plist-get scanner :scan)))
+
+(defun org-linear-in-place--scan-async (callback)
+  "Read the files in slices, then call CALLBACK with the sync's view of them.
+Between slices Emacs handles input, so that the scan never blocks it for
+long.  The view becomes `org-linear--scan' at once, so that a sync that
+fails meanwhile knows what it read."
+  (let ((scanner (org-linear-in-place--scanner)))
+    (setq org-linear--scan (plist-get scanner :scan))
+    (org-linear-in-place--run-slices
+     (lambda () (org-linear-in-place--scan-step scanner))
+     (lambda () (funcall callback (plist-get scanner :scan))))))
+
+(defun org-linear-in-place--run-slices (step done)
+  "Call STEP until it returns nil, in slices, then call DONE.
+Each slice calls STEP for `org-linear-in-place--slice' seconds, and the
+next one starts on a timer, so that Emacs handles input in between.  An
+error or a quit in a slice ends the sync."
+  (let (slice)
+    (setq slice
+          (org-linear--bound
+           (lambda ()
+             (org-linear--ending-sync-on-failure
+               (let ((deadline (+ (float-time) org-linear-in-place--slice))
+                     more)
+                 (while (and (setq more (funcall step)) (< (float-time) deadline)))
+                 (if more
+                     (run-with-timer org-linear-in-place--pause nil slice)
+                   (funcall done)))))))
+    (funcall slice)))
+
+(defun org-linear-in-place--scanner ()
+  "Return a new scan's state, a plist, ready for `org-linear-in-place--scan-step'.
+:scan is the sync's view, as `org-linear-in-place--new-scan' describes;
+:cache the scan cache; :seen the files found; :visiting the table of
+visited files; :dirs the directories still to list; :files the files
+found and not yet checked, as (FILE . MTIME); :index the files to index;
+and :job the indexing in progress."
+  (list :scan (org-linear-in-place--new-scan)
+        :cache (org-linear-in-place--cache)
+        :seen (make-hash-table :test #'equal)
+        :visiting (org-linear-in-place--visiting-table)
+        :dirs (seq-filter #'file-directory-p
+                          (mapcar #'expand-file-name org-linear-directories))
+        :files nil :index nil :job nil))
+
+(defun org-linear-in-place--new-scan ()
+  "Return an empty view of the files, a plist.
 :present maps every issue ID found in any file to its file; :tasks maps
 the IDs of linked headings in scope to markers; :new lists markers at
 headings in scope that have no issue yet; :pending holds the IDs their
 creation was sent with; :duplicates holds IDs with several headings;
 :buffers lists the buffers the sync may edit and :opened those it
-visited itself; :read lists the names of the files it indexed;
-:unfinished lists the files holding headings whose creation this sync
-sends or defers, by name, since the sync may close a file and visit it
-again; :skipped maps files to why they are left out.
-With a hierarchy, :nodes lists the nodes of task, project and milestone
-headings, :node-of maps the markers of tasks to their nodes, :objects
-maps the IDs of linked projects, initiatives and milestones to (KIND .
-NODE), :object-pending does the same for those being created, and :stale
-holds (ID . NODE) for each project or milestone heading that still has
-the issue it had as a task."
-  (let ((scan (list :present (make-hash-table :test #'equal)
-                    :tasks (make-hash-table :test #'equal)
-                    :new nil
-                    :pending (make-hash-table :test #'equal)
-                    :duplicates (make-hash-table :test #'equal)
-                    :nodes nil
-                    :node-of (make-hash-table :test #'eq)
-                    :objects (make-hash-table :test #'equal)
-                    :object-pending (make-hash-table :test #'equal)
-                    :stale nil
-                    :buffers nil :opened nil :linked nil :unfinished nil :read nil
-                    :skipped (make-hash-table :test #'equal)
-                    :indexed (make-hash-table :test #'equal)))
-        (cache (org-linear-in-place--cache))
-        (seen (make-hash-table :test #'equal))
-        (org-linear-in-place--visiting (org-linear-in-place--visiting-table)))
-    (dolist (file (org-linear-in-place--files))
-      (puthash file t seen)
-      (org-linear-in-place--scan-file file scan cache))
-    (maphash (lambda (file _) (unless (gethash file seen) (remhash file cache))) cache)
-    scan))
+visited itself; :ticks maps each indexed buffer to its modification
+count then; :read lists the names of the files it indexed; :unfinished
+lists the files holding headings whose creation this sync sends or
+defers, by name, since the sync may close a file and visit it again;
+:skipped maps files to why they are left out.  With a hierarchy, :nodes
+lists the nodes of task, project and milestone headings, :node-of maps
+the markers of tasks to their nodes, :objects maps the IDs of linked
+projects, initiatives and milestones to (KIND . NODE), :object-pending
+does the same for those being created, and :stale holds (ID . NODE) for
+each project or milestone heading that still has the issue it had as a
+task."
+  (list :present (make-hash-table :test #'equal)
+        :tasks (make-hash-table :test #'equal)
+        :new nil
+        :pending (make-hash-table :test #'equal)
+        :duplicates (make-hash-table :test #'equal)
+        :nodes nil
+        :node-of (make-hash-table :test #'eq)
+        :objects (make-hash-table :test #'equal)
+        :object-pending (make-hash-table :test #'equal)
+        :stale nil
+        :buffers nil :opened nil :linked nil :unfinished nil :read nil
+        :ticks (make-hash-table :test #'eq)
+        :skipped (make-hash-table :test #'equal)
+        :indexed (make-hash-table :test #'equal)))
 
-(defun org-linear-in-place--files ()
-  "Return the absolute names of the Org files under `org-linear-directories'."
-  (seq-mapcat (lambda (dir)
-                (when (file-directory-p dir)
-                  (seq-filter
-                   (lambda (file)
-                     (and (not (string-prefix-p ".#" (file-name-nondirectory file)))
-                          (file-regular-p file)))
-                   (directory-files-recursively
-                    (expand-file-name dir) org-linear-in-place--file-regexp nil
-                    (lambda (subdir) (not (string-prefix-p "." (file-name-nondirectory subdir))))))))
-              org-linear-directories))
+(defun org-linear-in-place--scan-step (scanner)
+  "Do one unit of SCANNER's work; return non-nil while work remains.
+A unit is a few headings of the file being indexed, the start of the
+next file to index, the check of one file found, or the listing of one
+directory.  The last step forgets the cache entries of files gone."
+  (let ((org-linear-in-place--visiting (plist-get scanner :visiting)))
+    (cond
+     ((plist-get scanner :job)
+      (org-linear-in-place--index-step scanner)
+      t)
+     ((plist-get scanner :index)
+      (let ((file (pop (plist-get scanner :index))))
+        (plist-put scanner :job (org-linear-in-place--index-job file (plist-get scanner :scan))))
+      t)
+     ((plist-get scanner :files)
+      (pcase-let ((`(,file . ,mtime) (pop (plist-get scanner :files))))
+        (org-linear-in-place--scan-file file mtime scanner))
+      t)
+     ((plist-get scanner :dirs)
+      (org-linear-in-place--list-directory (pop (plist-get scanner :dirs)) scanner)
+      t)
+     (t
+      (when-let* ((seen (plist-get scanner :seen)))
+        (let ((cache (plist-get scanner :cache)))
+          (maphash (lambda (file _) (unless (gethash file seen) (remhash file cache))) cache)))
+      nil))))
+
+(defun org-linear-in-place--list-directory (dir scanner)
+  "List DIR for SCANNER: its Org files to check, its subdirectories to list.
+Directories whose names start with a dot are left out, as are lock files;
+a symbolic link to a directory is not followed."
+  (dolist (entry (directory-files-and-attributes dir t nil t))
+    (let* ((file (car entry))
+           (name (file-name-nondirectory file))
+           (type (file-attribute-type (cdr entry))))
+      (cond
+       ((member name '("." "..")))
+       ((eq type t)
+        (unless (string-prefix-p "." name)
+          (plist-put scanner :dirs (cons file (plist-get scanner :dirs)))))
+       ((and (string-match-p org-linear-in-place--file-regexp name)
+             (not (string-prefix-p ".#" name))
+             (or (null type) (file-regular-p file)))
+        (plist-put scanner :files
+                   (cons (cons file (file-attribute-modification-time
+                                     (if (null type) (cdr entry) (file-attributes file))))
+                         (plist-get scanner :files))))))))
 
 (defun org-linear-in-place--cache ()
   "Return the scan cache: a hash table from file name to what it held.
@@ -211,13 +301,17 @@ It also changes with `org-linear-in-place--cache-version'."
   (or (string-suffix-p "_archive" file)
       (seq-some (lambda (regexp) (string-match-p regexp file)) org-linear-exclude-files)))
 
-(defun org-linear-in-place--scan-file (file scan cache)
-  "Add FILE to SCAN, reading it again unless CACHE shows it unchanged."
-  (let* ((buffer (org-linear-in-place--buffer-visiting file))
-         (mtime (file-attribute-modification-time (file-attributes file)))
+(defun org-linear-in-place--scan-file (file mtime scanner)
+  "Check FILE, last modified at MTIME, for SCANNER, reading it if it changed.
+A file the cache shows unchanged is not read; one with headings the sync
+must look at is queued for indexing."
+  (let* ((scan (plist-get scanner :scan))
+         (cache (plist-get scanner :cache))
+         (buffer (org-linear-in-place--buffer-visiting file))
          (entry (gethash file cache))
          (dirty (and buffer (buffer-modified-p buffer)))
          (changed (not (and entry (not dirty) (equal (plist-get entry :mtime) mtime)))))
+    (puthash file t (plist-get scanner :seen))
     (when changed
       (setq entry (org-linear-in-place--read-file file buffer mtime))
       (puthash file entry cache))
@@ -230,7 +324,7 @@ It also changes with `org-linear-in-place--cache-version'."
         (puthash file "it has unsaved edits" (plist-get scan :skipped))))
      ((and (plist-get entry :candidates)
            (or changed (plist-get entry :new)))
-      (org-linear-in-place--index-file file scan)))))
+      (plist-put scanner :index (append (plist-get scanner :index) (list file)))))))
 
 (defun org-linear-in-place--read-file (file buffer mtime)
   "Return a cache entry for FILE, read from BUFFER if it visits FILE.
@@ -289,19 +383,141 @@ The line must be in the heading's entry, before the next heading."
           (setq found t))))
     found))
 
+(defconst org-linear-in-place--headings-per-step 25
+  "Headings an indexing step reads before the scan checks the time.")
+
 (defun org-linear-in-place--index-file (file scan)
-  "Visit FILE and add its headings to SCAN, unless it cannot be edited now.
+  "Visit FILE and add its headings to SCAN at once, unless it cannot be edited now.
 Return its buffer, or nil.  A file already indexed, under whatever name,
 is not indexed again, so that no heading is counted twice."
   (or (when-let* ((visiting (find-buffer-visiting file)))
         (car (memq visiting (plist-get scan :buffers))))
-      (when-let* ((buffer (org-linear-in-place--usable-buffer file scan)))
-        (with-current-buffer buffer
-          (org-with-wide-buffer
-           (org-linear-in-place--index-buffer scan)))
-        (push buffer (plist-get scan :buffers))
-        (push (buffer-file-name buffer) (plist-get scan :read))
-        buffer)))
+      (when-let* ((job (org-linear-in-place--index-job file scan)))
+        (while (not (org-linear-in-place--index-headings job scan most-positive-fixnum)))
+        (org-linear-in-place--finish-job job scan)
+        (plist-get job :buffer))))
+
+(defun org-linear-in-place--index-job (file scan)
+  "Return the state of indexing FILE into SCAN, a plist, or nil.
+Nil means FILE is not indexed: it is already, under whatever name, or
+its buffer cannot be edited now.  The state holds the :buffer, the
+position to go on from, the buffer's modification count, and what the
+headings read so far added up to."
+  (unless (when-let* ((visiting (find-buffer-visiting file)))
+            (memq visiting (plist-get scan :buffers)))
+    (when-let* ((buffer (org-linear-in-place--usable-buffer file scan)))
+      (with-current-buffer buffer
+        (list :buffer buffer
+              :pos (save-restriction (widen) (copy-marker (point-min)))
+              :tick (buffer-chars-modified-tick)
+              :hierarchy (org-linear-in-place--hierarchy-p)
+              :new 0 :uuids nil :stack nil :nodes nil)))))
+
+(defun org-linear-in-place--index-step (scanner)
+  "Read the next headings of SCANNER's indexing job; end the job at its file's end.
+A buffer edited or killed since the job began is left out of the sync,
+and the log says so; its headings neither pull nor push until its next
+sync."
+  (let* ((job (plist-get scanner :job))
+         (scan (plist-get scanner :scan))
+         (buffer (plist-get job :buffer)))
+    (cond
+     ((not (and (buffer-live-p buffer)
+                (= (plist-get job :tick) (buffer-chars-modified-tick buffer))))
+      (org-linear--log "Skipped %s: it changed while the sync read it"
+                       (if (buffer-live-p buffer) (buffer-name buffer) "a killed buffer"))
+      (org-linear-in-place--forget-buffer buffer)
+      (set-marker (plist-get job :pos) nil)
+      (plist-put scanner :job nil))
+     ((org-linear-in-place--index-headings job scan org-linear-in-place--headings-per-step)
+      (org-linear-in-place--finish-job job scan)
+      (plist-put scanner :job nil)))))
+
+(defun org-linear-in-place--index-headings (job scan count)
+  "Add at most COUNT more headings of JOB's buffer to SCAN.
+Return non-nil once the buffer's last heading is read.  With a
+hierarchy, each task, project and milestone heading also gets a node;
+see `org-linear-in-place--node'."
+  (with-current-buffer (plist-get job :buffer)
+    (org-with-wide-buffer
+     (goto-char (plist-get job :pos))
+     (let ((hierarchy (plist-get job :hierarchy))
+           (done nil))
+       (while (and (> count 0) (not done))
+         (if (not (re-search-forward org-outline-regexp-bol nil t))
+             (setq done t)
+           (cl-decf count)
+           (org-linear-in-place--index-heading job scan hierarchy)
+           (end-of-line)))
+       (set-marker (plist-get job :pos) (point))
+       done))))
+
+(defun org-linear-in-place--index-heading (job scan hierarchy)
+  "Add the heading at point to SCAN, recording what it adds up to in JOB.
+HIERARCHY is non-nil when projects and milestones sync."
+  (let* ((uuid (org-entry-get nil "LINEAR_UUID"))
+         (pending (org-entry-get nil "LINEAR_PENDING_UUID"))
+         (keyword (org-get-todo-state))
+         (objects (and hierarchy (org-linear-in-place--heading-objects)))
+         (kind (org-linear-in-place--heading-kind keyword uuid objects))
+         (stack (plist-get job :stack)))
+    (when uuid (push uuid (plist-get job :uuids)))
+    (when pending (push pending (plist-get job :uuids)))
+    (dolist (object objects) (push (nth 1 object) (plist-get job :uuids)))
+    (when hierarchy
+      (setq stack (org-linear-in-place--pop-stack stack)))
+    (when (and kind (not (org-linear-in-place--excluded-heading-p keyword)))
+      (let ((node (and hierarchy (org-linear-in-place--node kind keyword stack scan))))
+        (when node
+          (push node stack)
+          (push node (plist-get job :nodes)))
+        (if (eq kind 'task)
+            (when (org-linear-in-place--index-task uuid pending keyword node scan)
+              (plist-put job :new (1+ (plist-get job :new))))
+          (org-linear-in-place--index-object node objects scan)
+          (when uuid
+            (plist-put scan :stale (cons (cons uuid node) (plist-get scan :stale)))))))
+    (plist-put job :stack stack)))
+
+(defun org-linear-in-place--finish-job (job scan)
+  "Record in SCAN what JOB's headings added up to, and that its buffer was indexed.
+The scan cache learns the buffer's IDs and whether it holds headings to
+create."
+  (let* ((buffer (plist-get job :buffer))
+         (file (buffer-file-name buffer))
+         (nodes (nreverse (plist-get job :nodes)))
+         (new (plist-get job :new))
+         (uuids (plist-get job :uuids)))
+    (set-marker (plist-get job :pos) nil)
+    (when (plist-get job :hierarchy)
+      (plist-put scan :nodes (append (plist-get scan :nodes) nodes))
+      (cl-incf new (seq-count #'org-linear-in-place--missing-objects nodes)))
+    (dolist (uuid uuids)
+      (puthash uuid file (plist-get scan :present)))
+    (when-let* ((entry (gethash file (org-linear-in-place--cache))))
+      (puthash file (plist-put (plist-put entry :new (> new 0)) :uuids uuids)
+               (org-linear-in-place--cache)))
+    (push buffer (plist-get scan :buffers))
+    (push file (plist-get scan :read))
+    (puthash buffer (buffer-chars-modified-tick buffer) (plist-get scan :ticks))))
+
+(defun org-linear-in-place--forget-buffer (buffer)
+  "Leave the headings of BUFFER out of the sync.
+Their issues stay present, so they are neither inserted again nor
+archived; they sync once the buffer is saved.  Its file is recorded as
+dropped, so that creations from it wait."
+  (let ((scan org-linear--scan))
+    (when-let* ((file (and (buffer-live-p buffer) (buffer-file-name buffer))))
+      (plist-put scan :dropped (cons file (plist-get scan :dropped))))
+    (maphash (lambda (id marker)
+               (when (eq (marker-buffer marker) buffer)
+                 (remhash id (plist-get scan :tasks))))
+             (plist-get scan :tasks))
+    (plist-put scan :new (seq-remove (lambda (marker) (eq (marker-buffer marker) buffer))
+                                     (plist-get scan :new)))
+    (org-linear-in-place--drop-nodes buffer)
+    (plist-put scan :buffers (remq buffer (plist-get scan :buffers)))
+    (plist-put scan :opened (remq buffer (plist-get scan :opened)))))
 
 (defun org-linear-in-place--usable-buffer (file scan)
   "Return a buffer visiting FILE that the sync may edit, or nil.
@@ -324,48 +540,6 @@ reverted first.  A buffer the sync visits itself is recorded in SCAN."
         (unless (derived-mode-p 'org-mode) (org-mode)))
       (plist-put scan :opened (cons buffer (plist-get scan :opened)))
       buffer))))
-
-(defun org-linear-in-place--index-buffer (scan)
-  "Add the headings of the current buffer to SCAN, and record its counts.
-With a hierarchy, each task, project and milestone heading also gets a
-node; see `org-linear-in-place--node'."
-  (let ((hierarchy (org-linear-in-place--hierarchy-p))
-        (new 0)
-        uuids stack nodes)
-    (goto-char (point-min))
-    (while (re-search-forward org-outline-regexp-bol nil t)
-      (let* ((uuid (org-entry-get nil "LINEAR_UUID"))
-             (pending (org-entry-get nil "LINEAR_PENDING_UUID"))
-             (keyword (org-get-todo-state))
-             (objects (and hierarchy (org-linear-in-place--heading-objects)))
-             (kind (org-linear-in-place--heading-kind keyword uuid objects)))
-        (when uuid (push uuid uuids))
-        (when pending (push pending uuids))
-        (dolist (object objects) (push (nth 1 object) uuids))
-        (when hierarchy
-          (setq stack (org-linear-in-place--pop-stack stack)))
-        (when (and kind (not (org-linear-in-place--excluded-heading-p keyword)))
-          (let ((node (and hierarchy (org-linear-in-place--node kind keyword stack scan))))
-            (when node
-              (push node stack)
-              (push node nodes))
-            (if (eq kind 'task)
-                (when (org-linear-in-place--index-task uuid pending keyword node scan)
-                  (cl-incf new))
-              (org-linear-in-place--index-object node objects scan)
-              (when uuid
-                (plist-put scan :stale (cons (cons uuid node) (plist-get scan :stale)))))))
-        (end-of-line)))
-    (when hierarchy
-      (setq nodes (nreverse nodes))
-      (plist-put scan :nodes (append (plist-get scan :nodes) nodes))
-      (cl-incf new (seq-count #'org-linear-in-place--missing-objects nodes)))
-    (dolist (uuid uuids)
-      (puthash uuid buffer-file-name (plist-get scan :present)))
-    (let ((entry (gethash buffer-file-name (org-linear-in-place--cache))))
-      (when entry
-        (puthash buffer-file-name (plist-put (plist-put entry :new (> new 0)) :uuids uuids)
-                 (org-linear-in-place--cache))))))
 
 (defun org-linear-in-place--index-task (uuid pending keyword node scan)
   "Add the task heading at point to SCAN; return non-nil if it has no issue.
@@ -394,22 +568,25 @@ KEYWORD its TODO keyword.  NODE is its node, or nil without a hierarchy."
 ;;;; Fetching
 
 (defun org-linear-in-place--start ()
-  "Scan the files, then fetch what changed in Linear."
+  "Scan the files in slices, then fetch what changed in Linear."
   (let ((started (format-time-string "%FT%TZ" (time-subtract nil 120) t)))
-    (setq org-linear--scan (org-linear-in-place--scan)
-          org-linear--body-overrides (make-hash-table :test #'equal))
-    (maphash (lambda (file reason) (org-linear--log "Skipped %s: %s"
-                                                    (abbreviate-file-name file) reason))
-             (plist-get org-linear--scan :skipped))
-    (org-linear-in-place--fetch
-     (lambda (data)
-       (org-linear-in-place--fetch-objects
-        (lambda (objects)
-          (push (cons 'objects objects) data)
-          (org-linear-in-place--locate data)
-          (org-linear-in-place--ensure-labels
-           (lambda ()
-             (org-linear-in-place--on-fetch data started)))))))))
+    (setq org-linear--body-overrides (make-hash-table :test #'equal))
+    (org-linear-in-place--scan-async
+     (lambda (scan)
+       (maphash (lambda (file reason) (org-linear--log "Skipped %s: %s"
+                                                       (abbreviate-file-name file) reason))
+                (plist-get scan :skipped))
+       (org-linear-in-place--fetch
+        (lambda (data)
+          (org-linear-in-place--fetch-objects
+           (lambda (objects)
+             (push (cons 'objects objects) data)
+             (org-linear-in-place--locate
+              data
+              (lambda ()
+                (org-linear-in-place--ensure-labels
+                 (lambda ()
+                   (org-linear-in-place--on-fetch data started)))))))))))))
 
 (defun org-linear-in-place--fetch (callback)
   "Fetch the metadata and the issues the sync needs, then CALLBACK with them.
@@ -501,30 +678,43 @@ STARTED is when the sync began, the next sync's starting point."
       (lambda ()
         (org-linear-in-place--apply-and-send data converted started))))))
 
-(defun org-linear-in-place--locate (data)
+(defun org-linear-in-place--locate (data callback)
   "Index the files of the issues in DATA whose files the scan did not visit.
 The inbox file is indexed too, in case new issues go there, and so are
 the files of the projects, initiatives and milestones that changed or
-went in Linear."
-  (when org-linear-inbox-file
-    (let ((inbox (expand-file-name org-linear-inbox-file)))
-      (unless (gethash inbox (plist-get org-linear--scan :skipped))
-        (org-linear-in-place--index-file inbox org-linear--scan))))
-  (dolist (task (alist-get 'tasks data))
-    (org-linear-in-place--locate-id (alist-get 'id task)))
-  (when (org-linear-in-place--hierarchy-p)
-    (let ((objects (org-linear-in-place--objects-by-id (alist-get 'objects data))))
-      (maphash (lambda (id base)
-                 (let ((object (gethash id objects)))
-                   (when (or (null object)
-                             (plist-get object :trashed)
-                             (not (equal (plist-get object :edited) (plist-get base :edited))))
-                     (org-linear-in-place--locate-id id))))
-               (org-linear--state-objects)))))
+went in Linear.  The files are indexed in slices, as the scan's are;
+then CALLBACK is called."
+  (let ((scanner (list :scan org-linear--scan :index (org-linear-in-place--files-to-locate data)
+                       :job nil)))
+    (org-linear-in-place--run-slices
+     (lambda () (org-linear-in-place--scan-step scanner))
+     callback)))
 
-(defun org-linear-in-place--locate-id (id)
-  "Index the file that holds the ID of an issue or object, if the scan did not.
-A file the scan leaves out stays out."
+(defun org-linear-in-place--files-to-locate (data)
+  "Return the files `org-linear-in-place--locate' indexes for DATA."
+  (let ((files nil))
+    (when org-linear-inbox-file
+      (let ((inbox (expand-file-name org-linear-inbox-file)))
+        (unless (gethash inbox (plist-get org-linear--scan :skipped))
+          (push inbox files))))
+    (dolist (task (alist-get 'tasks data))
+      (when-let* ((file (org-linear-in-place--file-to-locate (alist-get 'id task))))
+        (push file files)))
+    (when (org-linear-in-place--hierarchy-p)
+      (let ((objects (org-linear-in-place--objects-by-id (alist-get 'objects data))))
+        (maphash (lambda (id base)
+                   (let ((object (gethash id objects)))
+                     (when (or (null object)
+                               (plist-get object :trashed)
+                               (not (equal (plist-get object :edited) (plist-get base :edited))))
+                       (when-let* ((file (org-linear-in-place--file-to-locate id)))
+                         (push file files)))))
+                 (org-linear--state-objects))))
+    (delete-dups (nreverse files))))
+
+(defun org-linear-in-place--file-to-locate (id)
+  "Return the file holding ID, of an issue or object, if the sync should index it.
+That is a file the scan did not index and does not leave out."
   (let ((file (gethash id (plist-get org-linear--scan :present))))
     (when (and file
                (not (gethash id (plist-get org-linear--scan :tasks)))
@@ -533,7 +723,7 @@ A file the scan leaves out stays out."
                (not (gethash file (plist-get org-linear--scan :skipped)))
                (not (gethash file (plist-get org-linear--scan :indexed))))
       (puthash file t (plist-get org-linear--scan :indexed))
-      (org-linear-in-place--index-file file org-linear--scan))))
+      file)))
 
 (defun org-linear-in-place--body-pulls (data converted)
   "Return the description edits in DATA that would replace an unedited Org body.
@@ -638,37 +828,83 @@ Markdown style between pandoc and Linear do not count."
 
 (defun org-linear-in-place--apply-and-send (data converted started)
   "Apply DATA, with CONVERTED texts, to the files, save them, and send the edits.
+The changes are applied in slices; see `org-linear-in-place--apply-in-slices'.
 STARTED becomes the next sync's starting point."
-  (let (ops)
-    (org-linear-in-place--drop-changed-buffers)
-    (org-linear-in-place--with-edits
-     (lambda () (setq ops (org-linear-in-place--apply data converted))))
-    (org-linear-in-place--save-buffers)
-    (plist-put org-linear--state :since started)
-    (org-linear--save-state)
-    (org-linear--run-ops ops)))
+  (let ((plan (org-linear-in-place--apply-units data converted)))
+    (org-linear-in-place--apply-in-slices
+     (car plan)
+     (lambda ()
+       (let ((ops (org-linear-in-place--without-dropped (funcall (cdr plan)))))
+         (org-linear-in-place--save-buffers)
+         (plist-put org-linear--state :since started)
+         (org-linear--save-state)
+         (org-linear--run-ops ops))))))
+
+(defun org-linear-in-place--apply-in-slices (units done)
+  "Run UNITS, the steps that apply a sync's changes, in slices; then call DONE.
+A unit returns nil, or more units to run before the rest.  Each slice
+runs units as sync edits for `org-linear-in-place--slice' seconds, and
+at least one, and the next starts on a timer, so that Emacs handles
+input in between.  A buffer edited since the sync last touched it
+leaves the sync before the next slice, so that the sync never edits or
+saves a buffer of yours."
+  (let (slice)
+    (setq slice
+          (org-linear--bound
+           (lambda ()
+             (org-linear--ending-sync-on-failure
+               (org-linear-in-place--drop-changed-buffers)
+               (let ((deadline (+ (float-time) org-linear-in-place--slice)))
+                 (org-linear-in-place--with-edits
+                  (lambda ()
+                    (while (progn
+                             (let ((more (and units (funcall (pop units)))))
+                               (when (consp more)
+                                 (setq units (append more units))))
+                             (and units (< (float-time) deadline)))))))
+               (org-linear-in-place--record-ticks)
+               (if units
+                   (run-with-timer org-linear-in-place--pause nil slice)
+                 (funcall done))))))
+    (funcall slice)))
+
+(defun org-linear-in-place--record-ticks ()
+  "Record the modification count of each buffer the sync may edit, as it is now."
+  (dolist (buffer (plist-get org-linear--scan :buffers))
+    (when (buffer-live-p buffer)
+      (puthash buffer (buffer-chars-modified-tick buffer) (plist-get org-linear--scan :ticks)))))
+
+(defun org-linear-in-place--without-dropped (ops)
+  "Return OPS without the creations from files that left the sync while it applied.
+Their headings' pending IDs were not saved, so the creations wait."
+  (let ((dropped (plist-get org-linear--scan :dropped)))
+    (if (null dropped)
+        ops
+      (seq-remove (lambda (op)
+                    (let ((place (or (plist-get op :place)
+                                     (and (not (markerp (plist-get op :marker)))
+                                          (plist-get op :marker)))))
+                      (and place (member (plist-get place :file) dropped))))
+                  ops))))
 
 (defun org-linear-in-place--drop-changed-buffers ()
-  "Leave out of this sync the buffers edited or changed on disk since the scan.
-Their headings stay present, so their issues are neither inserted again
-nor archived; they sync once the buffer is saved."
+  "Leave out of this sync the buffers edited or changed on disk since it read them.
+An edit counts whether or not it was saved since: the sync compares each
+buffer's modification count with the one it recorded when it read or
+last edited the buffer, so that its own edits do not count.  Their
+headings stay present, so their issues are neither inserted again nor
+archived; they sync once the buffer is saved."
   (let* ((scan org-linear--scan)
          (changed (seq-filter (lambda (buffer)
                                 (or (not (buffer-live-p buffer))
-                                    (buffer-modified-p buffer)
-                                    (not (verify-visited-file-modtime buffer))))
+                                    (not (verify-visited-file-modtime buffer))
+                                    (not (eql (gethash buffer (plist-get scan :ticks))
+                                              (buffer-chars-modified-tick buffer)))))
                               (plist-get scan :buffers))))
     (dolist (buffer changed)
-      (org-linear--log "Skipped %s: it changed during the sync" (buffer-name buffer))
-      (maphash (lambda (id marker)
-                 (when (eq (marker-buffer marker) buffer)
-                   (remhash id (plist-get scan :tasks))))
-               (plist-get scan :tasks))
-      (plist-put scan :new (seq-remove (lambda (marker) (eq (marker-buffer marker) buffer))
-                                       (plist-get scan :new)))
-      (org-linear-in-place--drop-nodes buffer)
-      (plist-put scan :opened (remq buffer (plist-get scan :opened))))
-    (plist-put scan :buffers (seq-difference (plist-get scan :buffers) changed))))
+      (org-linear--log "Skipped %s: it changed during the sync"
+                       (if (buffer-live-p buffer) (buffer-name buffer) "a killed buffer"))
+      (org-linear-in-place--forget-buffer buffer))))
 
 (defun org-linear-in-place--with-edits (edit)
   "Call EDIT with the indexed buffers widened, as sync edits.
@@ -697,27 +933,51 @@ change from Linear would send its reversal."
           (with-current-buffer (car tick) (setq buffer-undo-list nil)))))))
 
 (defun org-linear-in-place--apply (data converted)
-  "Apply DATA to the files and return the edits to send.
+  "Apply DATA to the files at once and return the edits to send.
+CONVERTED maps conversion keys to Org text."
+  (let* ((plan (org-linear-in-place--apply-units data converted))
+         (units (car plan)))
+    (while units
+      (let ((more (funcall (pop units))))
+        (when (consp more)
+          (setq units (append more units)))))
+    (funcall (cdr plan))))
+
+(defun org-linear-in-place--apply-units (data converted)
+  "Return (UNITS . ASSEMBLE): the steps that apply DATA, and how to get the edits.
+Each of UNITS applies a part of DATA to the files; ASSEMBLE, called once
+they all ran, returns the edits to send, in the order Linear needs them.
 CONVERTED maps conversion keys to Org text."
   (if (org-linear-in-place--hierarchy-p)
-      (org-linear-in-place--apply-hierarchy data converted)
-    (org-linear-in-place--apply-flat data converted)))
+      (org-linear-in-place--hierarchy-units data converted)
+    (org-linear-in-place--flat-units data converted)))
 
-(defun org-linear-in-place--apply-flat (data converted)
-  "Apply DATA to the files and return the edits to send, without a hierarchy.
+(defun org-linear-in-place--task-units (data converted fetched collect)
+  "Return a unit for each issue of DATA that applies it to its heading.
+Each records the issue's ID in FETCHED and calls COLLECT with its edits.
 CONVERTED maps conversion keys to Org text."
-  (let* ((scan org-linear--scan)
-         (comments (org-linear--comments-by-issue data converted))
-         (fetched (make-hash-table :test #'equal))
-         ops)
-    (dolist (task (alist-get 'tasks data))
-      (let ((id (alist-get 'id task)))
-        (puthash id t fetched)
-        (setq ops (nconc ops (org-linear-in-place--apply-task
-                              task converted (gethash id comments))))))
-    (nconc ops
-           (org-linear-in-place--vanished-ops fetched)
-           (org-linear-in-place--creation-ops scan))))
+  (let ((comments (org-linear--comments-by-issue data converted)))
+    (mapcar (lambda (task)
+              (lambda ()
+                (let ((id (alist-get 'id task)))
+                  (puthash id t fetched)
+                  (funcall collect (org-linear-in-place--apply-task
+                                    task converted (gethash id comments)))
+                  nil)))
+            (alist-get 'tasks data))))
+
+(defun org-linear-in-place--flat-units (data converted)
+  "Return the units and assembly that apply DATA without a hierarchy.
+See `org-linear-in-place--apply-units'; CONVERTED is as there."
+  (let ((fetched (make-hash-table :test #'equal))
+        edits tail)
+    (cons (append (org-linear-in-place--task-units
+                   data converted fetched (lambda (ops) (push ops edits)))
+                  (list (lambda ()
+                          (setq tail (nconc (org-linear-in-place--vanished-ops fetched)
+                                            (org-linear-in-place--creation-ops org-linear--scan)))
+                          nil)))
+          (lambda () (append (apply #'append (nreverse edits)) tail)))))
 
 (defun org-linear-in-place--apply-task (task converted comments)
   "Apply TASK to its heading and return the edits to send for it.
@@ -1053,11 +1313,16 @@ Add the heading at the end if it is missing."
 ;;;; Saving
 
 (defun org-linear-in-place--save-buffers ()
-  "Save the buffers the sync edited and kill those it visited itself."
+  "Save the buffers the sync edited and kill those it visited itself.
+The scan cache learns the saved files afresh; of the others, which did
+not change, it learns only whether they still hold headings to create."
   (dolist (buffer (plist-get org-linear--scan :buffers))
     (when (buffer-live-p buffer)
-      (org-linear--save buffer)
-      (org-linear-in-place--refresh-cache buffer)))
+      (if (buffer-modified-p buffer)
+          (progn
+            (org-linear--save buffer)
+            (org-linear-in-place--refresh-cache buffer))
+        (org-linear-in-place--refresh-new (buffer-file-name buffer)))))
   (dolist (buffer (plist-get org-linear--scan :opened))
     (when (and (buffer-live-p buffer) (not (buffer-modified-p buffer)))
       (kill-buffer buffer))))
@@ -1075,19 +1340,22 @@ would otherwise take the files for unchanged.  The state is saved."
 
 (defun org-linear-in-place--refresh-cache (buffer)
   "Record BUFFER's file, as saved, in the scan cache.
-A file holding headings whose creation this sync sends or defers is
-marked to be read again by the next sync.  With a hierarchy, only such a
-file is, since the sync just read it: the text alone cannot tell a
-heading waiting for its creation from one that waits for a reason, such
-as an initiative while initiatives are turned off."
+Only a file holding headings whose creation this sync sends or defers is
+marked to be read again by the next sync: the sync just read it, and the
+text alone cannot tell a heading waiting for its creation from one left
+out for a reason, by a tag, as a habit, or as an initiative while
+initiatives are turned off."
   (let* ((file (buffer-file-name buffer))
          (entry (org-linear-in-place--read-file
                  file buffer (file-attribute-modification-time (file-attributes file)))))
-    (when (org-linear-in-place--hierarchy-p)
-      (setq entry (plist-put entry :new nil)))
-    (when (member file (plist-get org-linear--scan :unfinished))
-      (setq entry (plist-put entry :new t)))
-    (puthash file entry (org-linear-in-place--cache))))
+    (puthash file entry (org-linear-in-place--cache))
+    (org-linear-in-place--refresh-new file)))
+
+(defun org-linear-in-place--refresh-new (file)
+  "Record in the scan cache whether FILE holds headings this sync left to create.
+Those are headings whose creation it sent or deferred."
+  (when-let* ((entry (gethash file (org-linear-in-place--cache))))
+    (plist-put entry :new (and (member file (plist-get org-linear--scan :unfinished)) t))))
 
 ;;;; The hierarchy: headings and nodes
 
@@ -1546,32 +1814,39 @@ CONVERTED holds the converted descriptions."
 
 ;;;; The hierarchy: applying
 
-(defun org-linear-in-place--apply-hierarchy (data converted)
-  "Apply DATA to the files and return the edits to send, with a hierarchy.
-CONVERTED maps conversion keys to Org text.  Objects deleted in Linear
-cancel their headings first.  Then the objects and issues to create get
-their IDs, so that relations can name them, and the edits go out in the
-order Linear needs: new objects, edits of objects, new issues, edits of
-issues, and last what is archived."
-  (let* ((objects (org-linear-in-place--objects-by-id (alist-get 'objects data)))
-         (comments (org-linear--comments-by-issue data converted))
-         (fetched (make-hash-table :test #'equal))
-         (stale (org-linear-in-place--retire-stale-issues))
-         object-creates issue-creates object-edits issue-edits)
-    (org-linear-in-place--cancel-deleted-objects objects)
-    (org-linear-in-place--link-found-objects objects)
-    (setq object-creates (org-linear-in-place--object-creation-ops org-linear--scan))
-    (setq issue-creates (org-linear-in-place--creation-ops
-                         org-linear--scan
-                         (max 0 (- org-linear-create-limit (length object-creates)))))
-    (setq object-edits (org-linear-in-place--object-merge-ops objects converted))
-    (dolist (task (alist-get 'tasks data))
-      (let ((id (alist-get 'id task)))
-        (puthash id t fetched)
-        (setq issue-edits (nconc issue-edits (org-linear-in-place--apply-task
-                                              task converted (gethash id comments))))))
-    (append object-creates object-edits issue-creates issue-edits stale
-            (org-linear-in-place--vanished-ops fetched))))
+(defun org-linear-in-place--hierarchy-units (data converted)
+  "Return the units and assembly that apply DATA with a hierarchy.
+See `org-linear-in-place--apply-units'; CONVERTED is as there.  Headings
+that became projects or milestones lose their issues, and objects
+deleted in Linear cancel their headings, first.  Then the objects and
+issues to create get their IDs, so that relations can name them, and the
+edits go out in the order Linear needs: new objects, edits of objects,
+new issues, edits of issues, and last what is archived."
+  (let ((objects (org-linear-in-place--objects-by-id (alist-get 'objects data)))
+        (fetched (make-hash-table :test #'equal))
+        stale object-creates issue-creates object-edits issue-edits vanished)
+    (cons (append
+           (list (lambda ()
+                   (setq stale (org-linear-in-place--retire-stale-issues))
+                   (org-linear-in-place--cancel-deleted-objects objects)
+                   (org-linear-in-place--link-found-objects objects)
+                   (setq object-creates (org-linear-in-place--object-creation-ops org-linear--scan))
+                   (setq issue-creates (org-linear-in-place--creation-ops
+                                        org-linear--scan
+                                        (max 0 (- org-linear-create-limit (length object-creates)))))
+                   nil)
+                 (lambda ()
+                   (org-linear-in-place--object-merge-units
+                    objects converted (lambda (ops) (push ops object-edits)))))
+           (org-linear-in-place--task-units data converted fetched
+                                            (lambda (ops) (push ops issue-edits)))
+           (list (lambda ()
+                   (setq vanished (org-linear-in-place--vanished-ops fetched))
+                   nil)))
+          (lambda ()
+            (append object-creates (apply #'append (nreverse object-edits))
+                    issue-creates (apply #'append (nreverse issue-edits))
+                    stale vanished)))))
 
 (defun org-linear-in-place--retire-stale-issues ()
   "Unlink the issues of headings that became projects or milestones.
@@ -1648,23 +1923,29 @@ with Linear's description, so that it merges from there."
                  (org-linear--count :created))))
            (plist-get org-linear--scan :object-pending)))
 
-(defun org-linear-in-place--object-merge-ops (objects converted)
-  "Merge the fetched OBJECTS with their headings and return the edits to send.
-OBJECTS maps IDs to objects; CONVERTED maps conversion keys to Org text."
-  (let (ops)
+(defun org-linear-in-place--object-merge-units (objects converted collect)
+  "Return a unit for each linked object that merges it with its heading.
+OBJECTS maps IDs to fetched objects; each unit calls COLLECT with its
+edits.  CONVERTED maps conversion keys to Org text."
+  (let (units)
     (maphash (lambda (id entry)
-               (let ((object (gethash id objects)))
-                 (cond
-                  ((gethash id (plist-get org-linear--scan :duplicates))
-                   (org-linear--log "Not synced: the %s %s has more than one heading; delete the copies"
-                                    (car entry) id))
-                  ((null object)
-                   (org-linear--log "Not synced: the %s %s is not in Linear" (car entry) id))
-                  (t
-                   (setq ops (nconc ops (org-linear-in-place--merge-object
-                                         object (cdr entry) converted)))))))
+               (push (lambda ()
+                       (let ((object (gethash id objects)))
+                         (cond
+                          ((gethash id (plist-get org-linear--scan :duplicates))
+                           (org-linear--log "Not synced: the %s %s has more than one heading; delete the copies"
+                                            (car entry) id))
+                          ((null object)
+                           (org-linear--log "Not synced: the %s %s is not in Linear" (car entry) id))
+                          ((not (memq (marker-buffer (plist-get (cdr entry) :marker))
+                                      (plist-get org-linear--scan :buffers))))
+                          (t
+                           (funcall collect (org-linear-in-place--merge-object
+                                             object (cdr entry) converted)))))
+                       nil)
+                     units))
              (plist-get org-linear--scan :objects))
-    ops))
+    (nreverse units)))
 
 (defun org-linear-in-place--merge-object (object node converted)
   "Merge the Linear OBJECT with the heading of NODE three-way; return the edits.
