@@ -3211,6 +3211,44 @@ DEADLINE: <2026-12-01 Tue>
       (should (string-match-p "  Launch (milestone)" (buffer-string))))
     (kill-buffer "*org-linear preview*")))
 
+(ert-deftest org-linear-test-hierarchy-task-heading-becomes-milestone ()
+  "A heading that had an issue and is now a milestone archives the issue and gets a milestone."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Site\n** MILESTONE Launch\nNotes.\n*** TODO Copy\n"))
+    (let ((org-linear-project-keywords nil)
+          (org-linear-milestone-keywords nil)
+          (org-linear-exclude-keywords '("PROJECT")))
+      (org-linear-test--sync))
+    (let ((launch (alist-get 'id (org-linear-test--issue-titled "Launch"))))
+      (should launch)
+      (org-linear-test--sync-until-quiet)
+      (should (alist-get 'archived (gethash launch org-linear-test--issues)))
+      (should (org-linear-test--named org-linear-test--milestones "Launch"))
+      (should-not (org-linear-test--property-of "plan.org" "Launch" "LINEAR_UUID"))
+      (should (equal (org-linear-test--property-of "plan.org" "Launch" "LINEAR_MILESTONE")
+                     (org-linear-test--id-named org-linear-test--milestones "Launch")))
+      (should (string-match-p "Notes\\." (org-linear-test--note "plan.org")))
+      (should (equal (org-linear-test--relation "Copy" 'projectMilestone)
+                     (org-linear-test--id-named org-linear-test--milestones "Launch")))
+      (should (string-match-p "is now a milestone heading" (org-linear-test--log)))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes)))))
+
+(ert-deftest org-linear-test-hierarchy-conversions-over-limit-wait ()
+  "More headings to convert than `org-linear-archive-limit' convert none."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Site\n** MILESTONE Launch\n** MILESTONE Review\n"))
+    (let ((org-linear-project-keywords nil)
+          (org-linear-milestone-keywords nil)
+          (org-linear-exclude-keywords '("PROJECT")))
+      (org-linear-test--sync))
+    (let ((org-linear-archive-limit 1))
+      (org-linear-test--sync-until-quiet)
+      (should-not (org-linear-test--calls-ever "OrgLinearArchive"))
+      (should-not (org-linear-test--calls-ever "OrgLinearMilestoneCreate"))
+      (should (org-linear-test--property-of "plan.org" "Launch" "LINEAR_UUID"))
+      (should (string-match-p "Not converted: 2 headings" (org-linear-test--log))))))
+
 (ert-deftest org-linear-test-hierarchy-older-state ()
   "A state loaded before projects synced gets their table when they first do."
   (org-linear-test--with-hierarchy '(("plan.org" . "* PROJECT Site\n** TODO Copy\n"))

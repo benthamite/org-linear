@@ -144,7 +144,9 @@ again; :skipped maps files to why they are left out.
 With a hierarchy, :nodes lists the nodes of task, project and milestone
 headings, :node-of maps the markers of tasks to their nodes, :objects
 maps the IDs of linked projects, initiatives and milestones to (KIND .
-NODE), and :object-pending does the same for those being created."
+NODE), :object-pending does the same for those being created, and :stale
+holds (ID . NODE) for each project or milestone heading that still has
+the issue it had as a task."
   (let ((scan (list :present (make-hash-table :test #'equal)
                     :tasks (make-hash-table :test #'equal)
                     :new nil
@@ -154,6 +156,7 @@ NODE), and :object-pending does the same for those being created."
                     :node-of (make-hash-table :test #'eq)
                     :objects (make-hash-table :test #'equal)
                     :object-pending (make-hash-table :test #'equal)
+                    :stale nil
                     :buffers nil :opened nil :linked nil :unfinished nil :read nil
                     :skipped (make-hash-table :test #'equal)
                     :indexed (make-hash-table :test #'equal)))
@@ -349,7 +352,9 @@ node; see `org-linear-in-place--node'."
             (if (eq kind 'task)
                 (when (org-linear-in-place--index-task uuid pending keyword node scan)
                   (cl-incf new))
-              (org-linear-in-place--index-object node objects scan))))
+              (org-linear-in-place--index-object node objects scan)
+              (when uuid
+                (plist-put scan :stale (cons (cons uuid node) (plist-get scan :stale)))))))
         (end-of-line)))
     (when hierarchy
       (setq nodes (nreverse nodes))
@@ -1211,6 +1216,8 @@ pending ID does too, since its creation may need sending again."
   (let ((scan org-linear--scan)
         (in-buffer (lambda (node) (eq (marker-buffer (plist-get node :marker)) buffer))))
     (plist-put scan :nodes (seq-remove in-buffer (plist-get scan :nodes)))
+    (plist-put scan :stale (seq-remove (lambda (entry) (funcall in-buffer (cdr entry)))
+                                       (plist-get scan :stale)))
     (dolist (key '(:objects :object-pending))
       (let ((table (plist-get scan key))
             gone)
@@ -1546,6 +1553,7 @@ issues, and last what is archived."
   (let* ((objects (org-linear-in-place--objects-by-id (alist-get 'objects data)))
          (comments (org-linear--comments-by-issue data converted))
          (fetched (make-hash-table :test #'equal))
+         (stale (org-linear-in-place--retire-stale-issues))
          object-creates issue-creates object-edits issue-edits)
     (org-linear-in-place--cancel-deleted-objects objects)
     (org-linear-in-place--link-found-objects objects)
@@ -1559,8 +1567,38 @@ issues, and last what is archived."
         (puthash id t fetched)
         (setq issue-edits (nconc issue-edits (org-linear-in-place--apply-task
                                               task converted (gethash id comments))))))
-    (append object-creates object-edits issue-creates issue-edits
+    (append object-creates object-edits issue-creates issue-edits stale
             (org-linear-in-place--vanished-ops fetched))))
+
+(defun org-linear-in-place--retire-stale-issues ()
+  "Unlink the issues of headings that became projects or milestones.
+Return the edits that archive those issues.  Such a heading was synced
+as a task until its keyword, or the hierarchy options, made it a project
+or milestone heading; it gets its object as a new one does.  Each
+conversion is logged.  More than `org-linear-archive-limit' at once
+convert none: their headings keep their issues, get no object yet, and
+the log says why."
+  (let ((stale (plist-get org-linear--scan :stale)))
+    (cond
+     ((null stale) nil)
+     ((> (length stale) org-linear-archive-limit)
+      (org-linear--log "Not converted: %d headings with issues are now projects or milestones, more than `org-linear-archive-limit'"
+                       (length stale))
+      (dolist (entry stale) (plist-put (cdr entry) :open nil))
+      nil)
+     (t
+      (mapcar (lambda (entry) (org-linear-in-place--retire-stale-issue (car entry) (cdr entry)))
+              stale)))))
+
+(defun org-linear-in-place--retire-stale-issue (id node)
+  "Unlink the issue ID from the heading of NODE; return the edit archiving it."
+  (let ((kind (plist-get node :kind)))
+    (org-with-point-at (plist-get node :marker)
+      (org-linear--log "Archiving %s: its heading \"%s\" is now a %s heading, which gets a %s instead"
+                       (or (org-entry-get nil "LINEAR_ID") id) (org-get-heading t t t t) kind kind)
+      (dolist (property '("LINEAR_UUID" "LINEAR_ID" "LINEAR_URL" "LINEAR_REPEATED"))
+        (org-entry-delete nil property)))
+    (list :type 'archive :id id)))
 
 (defun org-linear-in-place--cancel-deleted-objects (objects)
   "Cancel the headings of synced objects that were deleted in Linear.
