@@ -47,6 +47,7 @@ The file
 * How fields map::
 * Workflow states and keywords::
 * Working with issues::
+* Milestones and sub-issues::
 * Closed issues::
 
 User options
@@ -148,6 +149,7 @@ The form rejects valid email addresses with a plus sign.
 * How fields map::
 * Workflow states and keywords::
 * Working with issues::
+* Milestones and sub-issues::
 * Closed issues::
 @end menu
 
@@ -209,7 +211,7 @@ To comment on an issue@comma{} add a note with @samp{C-c C-z} (@code{org-add-not
 @item
 To create an issue@comma{} add a level-2 heading with a TODO keyword under a project heading@comma{} with its description as the body. At the next sync it is created in Linear@comma{} in the project's team@comma{} and gets its @samp{LINEAR_ID}. Until Linear confirms the issue@comma{} the heading holds the ID it was sent with as @samp{LINEAR_PENDING_UUID}@comma{} so that an issue whose creation was not confirmed is found by the next sync rather than created twice.
 @item
-To move an issue to another project@comma{} refile it with @samp{C-c C-w}@comma{} or run @samp{M-x org-linear-set-project}@comma{} which also works from the list of your issues. Either way you choose among the teams' projects only@comma{} with ``No project'' to clear it@comma{} and the file is saved@comma{} which sends the move. With a prefix argument@comma{} @samp{C-c C-w} runs @code{org-refile} as usual@comma{} for instance to jump to a heading. An issue has to stay a level-2 heading: refiled by other means under another issue@comma{} it drops out of the sync@comma{} which adds it back as a second heading.
+To move an issue to another project@comma{} refile it with @samp{C-c C-w}@comma{} or run @samp{M-x org-linear-set-project}@comma{} which also works from the list of your issues. Either way you choose among the teams' projects only@comma{} with ``No project'' to clear it@comma{} and the file is saved@comma{} which sends the move. With a prefix argument@comma{} @samp{C-c C-w} runs @code{org-refile} as usual@comma{} for instance to jump to a heading. Without milestones and sub-issues (@ref{Milestones and sub-issues, , Milestones and sub-issues})@comma{} an issue has to stay a level-2 heading: refiled by other means under another issue@comma{} it drops out of the sync@comma{} which adds it back as a second heading.
 @item
 To assign an issue@comma{} tag it with the person's tag; an issue has one assignee@comma{} so a heading with two people's tags sends no assignee and the sync log says why.
 @end itemize
@@ -223,6 +225,34 @@ An issue deleted in Linear leaves the file at the next sync. If its heading hold
 
 @findex org-linear-visit
 @samp{M-x org-linear-visit} visits @code{org-linear-file}.
+
+@node Milestones and sub-issues
+@section Milestones and sub-issues
+
+@vindex org-linear-milestone-keywords
+Set @code{org-linear-milestone-keywords}@comma{} for instance to @code{("MILESTONE")}@comma{} and the file also shows each project's milestones and the issues' parents. Add the keyword to the file's @samp{#+TODO} line. Linear stays the primary copy: these relations merge as the other fields do@comma{} and when both sides changed one@comma{} Linear's value wins and yours goes to the sync log.
+
+@itemize
+@item
+Each milestone of a project is a level-2 heading under the project's heading@comma{} with the first of those keywords@comma{} its name as title@comma{} its target date as @samp{DEADLINE} and its description as body. Its ID is in @samp{LINEAR_MILESTONE}. The keyword stands for no status; Linear works that out itself.
+@item
+An issue in a milestone sits under the milestone's heading; the project's other issues come before its milestones.
+@item
+A sub-issue sits under its parent's heading when the two share project and milestone. Otherwise it sits where its own project and milestone put it@comma{} and its @samp{LINEAR_PARENT} property holds its parent's ID@.
+@end itemize
+
+@example
+* Website
+** TODO Pick a domain
+*** TODO Compare registrars                 sub-issue of Pick a domain
+** MILESTONE Launch
+DEADLINE: <2026-12-01 Tue>
+*** TODO Write the copy                     issue in the milestone Launch
+@end example
+
+Moving headings sends their relations. Move an issue under a milestone heading and it joins that milestone; under another issue and it becomes that issue's sub-issue@comma{} in that issue's project and milestone; back to its project's level and it leaves its parent and milestone. Delete @samp{LINEAR_PARENT} to detach a sub-issue that sits apart from its parent. A new milestone heading under a project heading becomes a milestone of that project@comma{} and a new TODO heading under an issue or milestone becomes an issue there; an issue moved under a milestone that is not yet in Linear joins it in the sync that runs once it is. Only what you moved is sent: when Linear moves a parent to another project@comma{} its sub-issues stay in theirs@comma{} out from under it.
+
+A milestone deleted in Linear leaves the file@comma{} and its issues move to the project's level@comma{} as Linear takes them out of it. If its heading holds edits or subheadings not in Linear@comma{} it stays as a plain heading@comma{} without keyword or ID@. Deleting a milestone's heading deletes nothing in Linear: it comes back at the next sync. When a parent leaves the file@comma{} its open sub-issues stay@comma{} each with its parent in @samp{LINEAR_PARENT}. @code{org-linear-archive} does not archive an issue that still holds sub-issues.
 
 @node Closed issues
 @section Closed issues
@@ -257,7 +287,7 @@ When both sides changed a field@comma{} Linear's value wins@comma{} and yours is
 
 Before each write the sync checks when the issue was last edited. If someone changed it in Linear after the sync read it@comma{} the write is refused and the issue is merged again at the next sync@comma{} so a change made in Linear is never overwritten. A write Linear rejects@comma{} for instance for an invalid value@comma{} is logged and not retried until you change what was sent; the sync's other writes still go through. A write that fails before Linear judges it@comma{} through a timeout@comma{} a server error or a rate limit@comma{} ends the sync instead@comma{} and the next sync tries it again.
 
-A sync never changes the file while it has unsaved edits@comma{} and never applies changes if the file changed on disk since you visited it. The changes a sync makes clear the buffer's undo history@comma{} since undoing them would send a reversal of your colleagues' changes to Linear.
+A sync never changes the file while it has unsaved edits@comma{} and never applies changes if the file changed on disk since you visited it. It reads the file in slices of a few hundredths of a second@comma{} between which Emacs handles your input@comma{} and then applies Linear's changes at once@comma{} so that the time Emacs waits grows with the number of changes@comma{} not the size of the file. If you edit the file while it reads@comma{} nothing is applied@comma{} the sync log says so@comma{} and the next sync starts afresh. The changes a sync makes clear the buffer's undo history@comma{} since undoing them would send a reversal of your colleagues' changes to Linear.
 
 @findex org-linear-auto-sync-mode
 @findex org-linear-file-mode

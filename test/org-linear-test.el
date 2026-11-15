@@ -376,6 +376,10 @@ A string is an error message; nil means NAME is no object operation."
       ("OrgLinearMilestoneUpdate"
        (org-linear-test--put-object org-linear-test--milestones id nil input)
        `((projectMilestoneUpdate . ((success . t) (projectMilestone . ,(gethash id org-linear-test--milestones))))))
+      ("OrgLinearMilestones"
+       `((projectMilestones
+          . ((pageInfo . ((hasNextPage . :false) (endCursor . nil)))
+             (nodes . ,(hash-table-values org-linear-test--milestones))))))
       ("OrgLinearMilestoneEdited"
        `((projectMilestone . ,(org-linear-test--edited org-linear-test--milestones id))))
       ("OrgLinearMilestoneArchive"
@@ -3451,6 +3455,340 @@ DEADLINE: <2026-12-01 Tue>
       (org-linear--ending-sync-on-failure (error "Boom"))
       (should-not org-linear--busy)
       (should (equal failed '("%s" "Boom"))))))
+
+;;;; Mirror layout: milestones and sub-issues
+
+(defmacro org-linear-test--with-mirror-hierarchy (&rest body)
+  "Run BODY with a fresh board whose mirror shows milestones and sub-issues.
+The fake workspace has the projects p-a and p-b, a milestone m1 of p-a
+named Launch, and issue ENG-2 in that milestone."
+  (declare (indent 0))
+  `(org-linear-test--with-board
+     (let ((org-linear-milestone-keywords '("MILESTONE"))
+           (org-linear-file-header
+            "#+TITLE: Linear\n#+PRIORITIES: A D D\n#+TODO: TRIAGE(r) BACKLOG(b) TODO(t) DOING(g) WAITING(w@) MILESTONE(m) | DONE(d) CANCELLED(c@)\n"))
+       (puthash "p-a" '((id . "p-a") (name . "Project A")) org-linear-test--projects)
+       (puthash "p-b" '((id . "p-b") (name . "Project B")) org-linear-test--projects)
+       (puthash "m1" `((id . "m1") (name . "Launch") (description . "Ship **it**.")
+                       (targetDate . "2026-12-01") (updatedAt . "2026-10-30T09:00:00Z")
+                       (project . ((id . "p-a"))))
+                org-linear-test--milestones)
+       (setf (alist-get 'projectMilestone (gethash "i2" org-linear-test--issues)) '((id . "m1")))
+       ,@body)))
+
+(defun org-linear-test--hierarchy-writes ()
+  "Return the names of the write operations of the last sync, milestones included."
+  (seq-filter (lambda (name) (member name '("OrgLinearUpdate" "OrgLinearComment" "OrgLinearCreate"
+                                            "OrgLinearMilestoneCreate" "OrgLinearMilestoneUpdate")))
+              (mapcar #'car (org-linear-test--calls))))
+
+(defun org-linear-test--outline ()
+  "Return the file's headings, each as its stars and title, in order."
+  (with-current-buffer (find-buffer-visiting org-linear-file)
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (let (headings)
+       (while (re-search-forward org-outline-regexp-bol nil t)
+         (push (concat (make-string (org-outline-level) ?*) " "
+                       (substring-no-properties (org-get-heading t nil t t)))
+               headings)
+         (end-of-line))
+       (nreverse headings)))))
+
+(defun org-linear-test--move-under (identifier regexp level)
+  "Move the heading of IDENTIFIER to the end of the heading matching REGEXP.
+It lands at LEVEL, as a user's refile would leave it."
+  (org-linear-test--goto identifier)
+  (let ((text (buffer-substring (point) (progn (org-end-of-subtree t t) (point)))))
+    (org-linear-test--goto identifier)
+    (delete-region (point) (progn (org-end-of-subtree t t) (point)))
+    (goto-char (point-min))
+    (re-search-forward regexp)
+    (org-end-of-subtree t t)
+    (unless (bolp) (insert "\n"))
+    (insert (replace-regexp-in-string "\\`\\*+" (make-string level ?*) text))))
+
+(defun org-linear-test--sorted-input (id)
+  "Return the input of the last update sent for issue ID, sorted by key."
+  (sort (copy-sequence (org-linear-test--input id))
+        (lambda (a b) (string< (car a) (car b)))))
+
+(defun org-linear-test--relations (identifier)
+  "Return the relations the heading of IDENTIFIER shows."
+  (save-excursion
+    (org-linear-test--goto identifier)
+    (org-linear--tree-relations)))
+
+(ert-deftest org-linear-test-mirror-hierarchy-first-sync-shows-milestones-and-sub-issues ()
+  "Milestones become headings, issues go under them and sub-issues under parents."
+  (org-linear-test--with-mirror-hierarchy
+    (setf (alist-get 'parent (gethash "i6" org-linear-test--issues)) '((id . "i1")))
+    (org-linear-test--sync)
+    (should (equal (org-linear-test--outline)
+                   '("* Project A" "** TODO Task one" "*** TRIAGE Peter's task"
+                     "** MILESTONE Launch" "*** WAITING Joint task"
+                     "* Project B" "** DONE Closed today")))
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (goto-char (point-min))
+      (re-search-forward "^\\*\\* MILESTONE Launch")
+      (should (equal (org-entry-get nil "LINEAR_MILESTONE") "m1"))
+      (should (equal (org-linear--planning-date "DEADLINE") "2026-12-01"))
+      (should (equal (org-linear--body) "Ship *it*.")))
+    (should (equal (org-linear-test--relations "ENG-6") '(:project "p-a" :milestone nil :parent "i1")))
+    (should (equal (org-linear-test--relations "ENG-2") '(:project "p-a" :milestone "m1" :parent nil)))
+    (should-not (org-linear-test--hierarchy-writes))
+    (let ((text (org-linear-test--text)))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes))
+      (should (equal (org-linear-test--text) text)))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-off-ignores-relations ()
+  "Without milestone keywords, sub-issues stay level-2 headings and nothing is sent."
+  (org-linear-test--with-board
+    (setf (alist-get 'parent (gethash "i6" org-linear-test--issues)) '((id . "i1")))
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-6")
+    (should (= (org-outline-level) 2))
+    (should-not (org-entry-get nil "LINEAR_PARENT"))
+    (should-not (string-match-p "MILESTONE" (org-linear-test--text)))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--writes))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-moves-sent ()
+  "Moving an issue under a milestone or another issue sends just those relations."
+  (org-linear-test--with-mirror-hierarchy
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (org-linear-test--editing
+        (org-linear-test--move-under "ENG-6" "^\\*+ WAITING Joint task" 4)
+        (org-linear-test--move-under "ENG-1" "^\\*\\* MILESTONE Launch" 3)))
+    (org-linear-test--sync)
+    (should (equal (org-linear-test--hierarchy-writes) '("OrgLinearUpdate" "OrgLinearUpdate")))
+    (should (equal (org-linear-test--sorted-input "i6") '((parentId . "i2") (projectMilestoneId . "m1"))))
+    (should (equal (org-linear-test--input "i1") '((projectMilestoneId . "m1"))))
+    (let ((i6 (gethash "i6" org-linear-test--issues)))
+      (should (equal (alist-get 'parent i6) '((id . "i2"))))
+      (should (equal (alist-get 'name (alist-get 'state i6)) "Triage"))
+      (should (equal (alist-get 'assignee i6) (org-linear-test--user "u-peter")))
+      (should (equal (alist-get 'project i6) '((id . "p-a")))))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))
+    ;; Moving it back out, to the project, clears both.
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (org-linear-test--editing
+        (org-linear-test--move-under "ENG-6" "^\\* Project A" 2)
+        (goto-char (point-min))
+        (re-search-forward "^\\* Project A")
+        (org-end-of-subtree t t)))
+    (org-linear-test--sync)
+    (should (equal (org-linear-test--sorted-input "i6")
+                   '((parentId . :null) (projectMilestoneId . :null))))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-linear-changes-move-headings ()
+  "Relations changed in Linear move the headings and send nothing."
+  (org-linear-test--with-mirror-hierarchy
+    (setf (alist-get 'parent (gethash "i6" org-linear-test--issues)) '((id . "i1")))
+    (org-linear-test--sync)
+    (org-linear-test--edit "i2" 'projectMilestone nil)
+    (org-linear-test--edit "i6" 'parent '((id . "i2")))
+    (org-linear-test--edit "i1" 'projectMilestone '((id . "m1")))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))
+    (should (equal (org-linear-test--outline)
+                   '("* Project A" "** WAITING Joint task" "*** TRIAGE Peter's task"
+                     "** MILESTONE Launch" "*** TODO Task one"
+                     "* Project B" "** DONE Closed today")))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-parent-move-leaves-children-alone ()
+  "A parent moved to another project in Linear does not carry its sub-issue's project.
+The sub-issue stays in its project, with its parent in LINEAR_PARENT, and
+nothing is sent for it."
+  (org-linear-test--with-mirror-hierarchy
+    (setf (alist-get 'parent (gethash "i6" org-linear-test--issues)) '((id . "i1")))
+    (org-linear-test--sync)
+    (org-linear-test--edit "i1" 'project '((id . "p-b")))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))
+    (should (equal (org-linear-test--relations "ENG-6") '(:project "p-a" :milestone nil :parent "i1")))
+    (should (equal (org-linear-test--relations "ENG-1") '(:project "p-b" :milestone nil :parent nil)))
+    (org-linear-test--goto "ENG-6")
+    (should (= (org-outline-level) 2))
+    (should (equal (org-entry-get nil "LINEAR_PARENT") "i1"))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))
+    (should (equal (alist-get 'project (gethash "i6" org-linear-test--issues)) '((id . "p-a"))))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-cross-project-parent ()
+  "A sub-issue in another project than its parent keeps the parent in a property."
+  (org-linear-test--with-mirror-hierarchy
+    (puthash "i7" (org-linear-test--issue "i7" "ENG-7" "Elsewhere" :project "p-b")
+             org-linear-test--issues)
+    (setf (alist-get 'parent (gethash "i7" org-linear-test--issues)) '((id . "i1")))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))
+    (org-linear-test--goto "ENG-7")
+    (should (equal (org-entry-get nil "LINEAR_PARENT") "i1"))
+    (should (equal (org-linear-test--relations "ENG-7") '(:project "p-b" :milestone nil :parent "i1")))
+    ;; Moving it under its parent sends only the project.
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (org-linear-test--editing
+        (org-linear-test--move-under "ENG-7" "^\\*+ TODO .*Task one" 3)))
+    (org-linear-test--sync)
+    (should (equal (org-linear-test--input "i7") '((projectId . "p-a"))))
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-7")
+    (should-not (org-entry-get nil "LINEAR_PARENT"))
+    (should-not (org-linear-test--hierarchy-writes))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-conflict-keeps-linear ()
+  "A relation changed on both sides keeps Linear's and logs yours."
+  (org-linear-test--with-mirror-hierarchy
+    (org-linear-test--sync)
+    (org-linear-test--edit "i6" 'parent '((id . "i2")))
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (org-linear-test--editing
+        (org-linear-test--move-under "ENG-6" "^\\*+ TODO .*Task one" 3)))
+    (org-linear-test--sync)
+    (should-not (assoc "OrgLinearUpdate" (org-linear-test--calls)))
+    (should (string-match-p "Conflict in ENG-6 parent" (org-linear-test--log)))
+    (should (equal (org-linear-test--relations "ENG-6") '(:project "p-a" :milestone nil :parent "i2")))
+    (org-linear-test--goto "ENG-6")
+    (should (equal (org-entry-get nil "LINEAR_PARENT") "i2"))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-closed-parent-frees-sub-issues ()
+  "A parent that leaves the file leaves its open sub-issue behind, unchanged."
+  (org-linear-test--with-mirror-hierarchy
+    (let ((org-linear-closed-retention-days 0))
+      (setf (alist-get 'parent (gethash "i6" org-linear-test--issues)) '((id . "i1")))
+      (org-linear-test--sync)
+      (org-linear-test--close-long-ago "i1")
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes))
+      (should-not (string-match-p "Task one" (org-linear-test--text)))
+      (org-linear-test--goto "ENG-6")
+      (should (= (org-outline-level) 2))
+      (should (equal (org-entry-get nil "LINEAR_PARENT") "i1"))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes)))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-new-milestone-and-issue-created ()
+  "A new milestone heading is created in its project, and a new issue under it joins it."
+  (org-linear-test--with-mirror-hierarchy
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (goto-char (point-min))
+      (re-search-forward "^\\* Project B$")
+      (org-end-of-subtree t t)
+      (insert "** MILESTONE Beta\nDEADLINE: <2026-12-20 Sun>\nFirst users.\n"
+              "*** TODO Invite testers\n**** TODO Write the invitation\n"))
+    (org-linear-test--sync)
+    (should (equal (org-linear-test--hierarchy-writes)
+                   '("OrgLinearMilestoneCreate" "OrgLinearCreate" "OrgLinearCreate")))
+    (let* ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearMilestoneCreate"))))
+           (id (alist-get 'id input))
+           (creates (mapcar (lambda (call) (alist-get 'input (cdr call)))
+                            (org-linear-test--calls "OrgLinearCreate"))))
+      (should (equal (alist-get 'projectId input) "p-b"))
+      (should (equal (alist-get 'name input) "Beta"))
+      (should (equal (alist-get 'targetDate input) "2026-12-20"))
+      (should (equal (alist-get 'description input) "First users."))
+      (should (equal (alist-get 'projectMilestoneId (car creates)) id))
+      (should (equal (alist-get 'projectId (car creates)) "p-b"))
+      (should (equal (alist-get 'projectMilestoneId (cadr creates)) id))
+      (should (equal (alist-get 'parentId (cadr creates)) (alist-get 'id (car creates))))
+      (should (string-match-p (format ":LINEAR_MILESTONE: +%s" id) (org-linear-test--text))))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-issue-moved-under-new-milestone ()
+  "An issue moved under a milestone heading not yet in Linear joins it once it exists."
+  (org-linear-test--with-mirror-hierarchy
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (org-linear-test--editing
+        (goto-char (point-min))
+        (re-search-forward "^\\* Project A$")
+        (org-end-of-subtree t t)
+        (insert "** MILESTONE Later\n")
+        (org-linear-test--move-under "ENG-1" "^\\*\\* MILESTONE Later" 3)))
+    (org-linear-test--sync)
+    (should (member "OrgLinearMilestoneCreate" (org-linear-test--hierarchy-writes)))
+    (should-not (org-linear-test--input "i1"))
+    ;; The sync runs again by itself; here it is run by hand.
+    (org-linear-test--sync)
+    (let ((milestone (alist-get 'id (alist-get 'input (cdar (org-linear-test--calls-ever
+                                                            "OrgLinearMilestoneCreate"))))))
+      (should (equal (org-linear-test--input "i1") `((projectMilestoneId . ,milestone)))))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-milestone-fields-merge ()
+  "A milestone renamed in Linear is renamed here; its date edited here is sent."
+  (org-linear-test--with-mirror-hierarchy
+    (org-linear-test--sync)
+    (org-linear-test--put-object org-linear-test--milestones "m1" nil '((name . "Public launch")))
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (org-linear-test--editing
+        (goto-char (point-min))
+        (re-search-forward "^\\*\\* MILESTONE Launch")
+        (org-linear--set-planning 'deadline "2026-12-15")))
+    (org-linear-test--sync)
+    (should (string-match-p "^\\*\\* MILESTONE Public launch" (org-linear-test--text)))
+    (let ((update (cdar (org-linear-test--calls "OrgLinearMilestoneUpdate"))))
+      (should (equal (alist-get 'input update) '((targetDate . "2026-12-15")))))
+    (should (equal (alist-get 'name (gethash "m1" org-linear-test--milestones)) "Public launch"))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-milestone-deleted-in-linear ()
+  "A milestone deleted in Linear leaves the file, and its issues go to the project."
+  (org-linear-test--with-mirror-hierarchy
+    (org-linear-test--sync)
+    (org-linear-test--answer-object "OrgLinearMilestoneArchive" '((id . "m1")))
+    (org-linear-test--edit "i2" 'projectMilestone nil)
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))
+    (should-not (string-match-p "Launch" (org-linear-test--text)))
+    (should (equal (org-linear-test--relations "ENG-2") '(:project "p-a" :milestone nil :parent nil)))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-edit-during-read-applies-nothing ()
+  "An edit to the file while the sync reads it stops the sync from applying anything."
+  (org-linear-test--with-mirror-hierarchy
+    (org-linear-test--sync)
+    (org-linear-test--edit "i1" 'title "Renamed in Linear")
+    (let ((read (symbol-function 'org-linear--read-task))
+          (typed nil))
+      (cl-letf (((symbol-function 'org-linear--read-task)
+                 (lambda (&rest args)
+                   (unless typed
+                     (setq typed t)
+                     (with-current-buffer (find-buffer-visiting org-linear-file)
+                       (goto-char (point-max))
+                       (insert "typing")))
+                   (apply read args))))
+        (org-linear-test--sync)))
+    (should (string-match-p "changed while the sync read it" (org-linear-test--log)))
+    (should-not (string-match-p "Renamed in Linear" (org-linear-test--text)))
+    (should-not (org-linear-test--hierarchy-writes))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-set-project-keeps-parent ()
+  "Moving a sub-issue to another project keeps its parent, in LINEAR_PARENT."
+  (org-linear-test--with-mirror-hierarchy
+    (setf (alist-get 'parent (gethash "i6" org-linear-test--issues)) '((id . "i1")))
+    (org-linear-test--sync)
+    (org-linear-test--goto "ENG-6")
+    (let ((org-linear--saving t))
+      (org-linear--move-and-save (point-marker) "p-b"))
+    (should (equal (org-linear-test--relations "ENG-6") '(:project "p-b" :milestone nil :parent "i1")))
+    (org-linear-test--sync)
+    (should (equal (org-linear-test--input "i6") '((projectId . "p-b"))))))
+
+(ert-deftest org-linear-test-mirror-hierarchy-shift-levels ()
+  "Shifting a subtree's levels moves offsets past each changed heading."
+  (should (equal (org-linear--shift-levels "** A\nx\n*** B\n" 1 '((m . 7)))
+                 '("*** A\nx\n**** B\n" (m . 8))))
+  (should (equal (org-linear--shift-levels "*** A\n**** B\n" -1 '((m . 6)))
+                 '("** A\n*** B\n" (m . 5)))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

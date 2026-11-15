@@ -136,7 +136,7 @@ Edit issues with ordinary Org commands, then save the file; with ~org-linear-aut
 
 - To comment on an issue, add a note with =C-c C-z= (~org-add-note~), or with =M-x org-linear-comment=, which also works from the list of your issues. Notes attached to state changes, such as the one the default header asks for when you cancel an issue, are posted too, prefixed with the new keyword.
 - To create an issue, add a level-2 heading with a TODO keyword under a project heading, with its description as the body. At the next sync it is created in Linear, in the project's team, and gets its =LINEAR_ID=. Until Linear confirms the issue, the heading holds the ID it was sent with as =LINEAR_PENDING_UUID=, so that an issue whose creation was not confirmed is found by the next sync rather than created twice.
-- To move an issue to another project, refile it with =C-c C-w=, or run =M-x org-linear-set-project=, which also works from the list of your issues. Either way you choose among the teams' projects only, with "No project" to clear it, and the file is saved, which sends the move. With a prefix argument, =C-c C-w= runs ~org-refile~ as usual, for instance to jump to a heading. An issue has to stay a level-2 heading: refiled by other means under another issue, it drops out of the sync, which adds it back as a second heading.
+- To move an issue to another project, refile it with =C-c C-w=, or run =M-x org-linear-set-project=, which also works from the list of your issues. Either way you choose among the teams' projects only, with "No project" to clear it, and the file is saved, which sends the move. With a prefix argument, =C-c C-w= runs ~org-refile~ as usual, for instance to jump to a heading. Without milestones and sub-issues ([[#h:mirror-hierarchy][Milestones and sub-issues]]), an issue has to stay a level-2 heading: refiled by other means under another issue, it drops out of the sync, which adds it back as a second heading.
 - To assign an issue, tag it with the person's tag; an issue has one assignee, so a heading with two people's tags sends no assignee and the sync log says why.
 
 Deleting a heading does not delete the issue: it comes back at the next sync, with its description and comments. To drop an issue, cancel it.
@@ -148,6 +148,31 @@ An issue deleted in Linear leaves the file at the next sync. If its heading hold
 
 #+findex: org-linear-visit
 =M-x org-linear-visit= visits ~org-linear-file~.
+
+** Milestones and sub-issues
+:PROPERTIES:
+:CUSTOM_ID: h:mirror-hierarchy
+:END:
+
+#+vindex: org-linear-milestone-keywords
+Set ~org-linear-milestone-keywords~, for instance to ~("MILESTONE")~, and the file also shows each project's milestones and the issues' parents. Add the keyword to the file's =#+TODO= line. Linear stays the primary copy: these relations merge as the other fields do, and when both sides changed one, Linear's value wins and yours goes to the sync log.
+
+- Each milestone of a project is a level-2 heading under the project's heading, with the first of those keywords, its name as title, its target date as =DEADLINE= and its description as body. Its ID is in =LINEAR_MILESTONE=. The keyword stands for no status; Linear works that out itself.
+- An issue in a milestone sits under the milestone's heading; the project's other issues come before its milestones.
+- A sub-issue sits under its parent's heading when the two share project and milestone. Otherwise it sits where its own project and milestone put it, and its =LINEAR_PARENT= property holds its parent's ID.
+
+#+begin_src org
+,* Website
+,** TODO Pick a domain
+,*** TODO Compare registrars                 sub-issue of Pick a domain
+,** MILESTONE Launch
+DEADLINE: <2026-12-01 Tue>
+,*** TODO Write the copy                     issue in the milestone Launch
+#+end_src
+
+Moving headings sends their relations. Move an issue under a milestone heading and it joins that milestone; under another issue and it becomes that issue's sub-issue, in that issue's project and milestone; back to its project's level and it leaves its parent and milestone. Delete =LINEAR_PARENT= to detach a sub-issue that sits apart from its parent. A new milestone heading under a project heading becomes a milestone of that project, and a new TODO heading under an issue or milestone becomes an issue there; an issue moved under a milestone that is not yet in Linear joins it in the sync that runs once it is. Only what you moved is sent: when Linear moves a parent to another project, its sub-issues stay in theirs, out from under it.
+
+A milestone deleted in Linear leaves the file, and its issues move to the project's level, as Linear takes them out of it. If its heading holds edits or subheadings not in Linear, it stays as a plain heading, without keyword or ID. Deleting a milestone's heading deletes nothing in Linear: it comes back at the next sync. When a parent leaves the file, its open sub-issues stay, each with its parent in =LINEAR_PARENT=. ~org-linear-archive~ does not archive an issue that still holds sub-issues.
 
 ** Closed issues
 :PROPERTIES:
@@ -181,7 +206,7 @@ The merge is three-way. For each field the sync compares the file and Linear wit
 
 Before each write the sync checks when the issue was last edited. If someone changed it in Linear after the sync read it, the write is refused and the issue is merged again at the next sync, so a change made in Linear is never overwritten. A write Linear rejects, for instance for an invalid value, is logged and not retried until you change what was sent; the sync's other writes still go through. A write that fails before Linear judges it, through a timeout, a server error or a rate limit, ends the sync instead, and the next sync tries it again.
 
-A sync never changes the file while it has unsaved edits, and never applies changes if the file changed on disk since you visited it. The changes a sync makes clear the buffer's undo history, since undoing them would send a reversal of your colleagues' changes to Linear.
+A sync never changes the file while it has unsaved edits, and never applies changes if the file changed on disk since you visited it. It reads the file in slices of a few hundredths of a second, between which Emacs handles your input, and then applies Linear's changes at once, so that the time Emacs waits grows with the number of changes, not the size of the file. If you edit the file while it reads, nothing is applied, the sync log says so, and the next sync starts afresh. The changes a sync makes clear the buffer's undo history, since undoing them would send a reversal of your colleagues' changes to Linear.
 
 #+findex: org-linear-auto-sync-mode
 #+findex: org-linear-file-mode

@@ -306,6 +306,31 @@ Linear refused a write, or a closed issue can leave once its edits are sent.")
 (defvar org-linear--body-overrides nil
   "Hash table from issue ID to the Org body a sync pulls instead of pandoc's.")
 
+(defvar org-linear--views nil
+  "Hash table from issue heading markers to their views, read before applying.
+`org-linear--local-view' takes a heading's view from it once, the first
+time it is asked, so that applying a sync reads only what it changes.")
+
+(defvar org-linear--placements nil
+  "Hash table from issue heading markers to the relations they must show.
+Each value is a plist of the relations, :project, :milestone and :parent,
+that the merge pulled from Linear; the others stay as the heading's
+place shows them.  Bound while the mirror layout applies a sync with a
+hierarchy, which moves the headings once every issue is merged.")
+
+(defvar org-linear--removals nil
+  "Headings that leave the file once the sync has placed the others.
+Each is (ID . FUNCTION), FUNCTION removing the heading of issue ID.
+Bound while the mirror layout applies a sync with a hierarchy, so that
+the sub-issues of a heading that leaves move out of it first.")
+
+(defvar org-linear--skipped-pending nil
+  "Non-nil when a relation to a heading not yet in Linear waited.
+It is sent by the sync that runs once that heading is created.")
+
+(defvar org-linear--apply-index nil
+  "The index of the file while the mirror layout applies a sync.")
+
 (defconst org-linear--log-buffer "*org-linear*"
   "Buffer that records conflicts, refusals and errors.")
 
@@ -398,11 +423,14 @@ both.  See the manual.  A keyword that is also in
   :group 'org-linear)
 
 (defcustom org-linear-milestone-keywords nil
-  "TODO keywords of the headings the in-place layout syncs as milestones.
-Such a heading is never an issue.  It becomes a milestone of the Linear
-project of the nearest project heading above it, and the issues below
-it are assigned to it.  A keyword that is also in
-`org-linear-exclude-keywords' is left out."
+  "TODO keywords of the headings synced as milestones.
+Such a heading is never an issue.  In the in-place layout it becomes a
+milestone of the Linear project of the nearest project heading above it,
+and the issues below it are assigned to it.  A keyword that is also in
+`org-linear-exclude-keywords' is left out.  In the mirror layout, setting
+it also shows each project's milestones as level-2 headings with the
+first of these keywords, and sub-issues under their parents; see the
+manual."
   :type '(repeat string)
   :group 'org-linear)
 
@@ -626,6 +654,16 @@ the sync too, and then continues."
 (declare-function org-linear-in-place--known-relations "org-linear-in-place" (op))
 (declare-function org-linear-in-place--sent-relations "org-linear-in-place" (base relations))
 (declare-function org-linear-in-place--run-object "org-linear-in-place" (op next))
+(declare-function org-linear-in-place--run-slices "org-linear-in-place" (step done))
+(declare-function org-linear-in-place--object "org-linear-in-place" (kind node))
+(declare-function org-linear-in-place--object-remote-view "org-linear-in-place"
+                  (object converted base held))
+(declare-function org-linear-in-place--fetch-object-chunks "org-linear-in-place"
+                  (chunks acc callback))
+(declare-function org-linear-in-place--mutation "org-linear-in-place" (kind action))
+(declare-function org-linear-in-place--create-input "org-linear-in-place" (op md))
+(declare-function org-linear-in-place--payload "org-linear-in-place" (kind action data))
+(defvar org-linear-in-place--object-fields)
 
 (defun org-linear--start ()
   "Save the file if needed, then fetch the issues."
@@ -872,13 +910,20 @@ Signal an error if point is on no issue of `org-linear-file'."
       (user-error "No Linear issue at point")))
 
 (defun org-linear--enclosing-issue ()
-  "Return a marker at the issue that the text at point belongs to, or nil."
+  "Return a marker at the issue that the text at point belongs to, or nil.
+With a hierarchy, that is the nearest issue heading at or above point;
+otherwise the level-2 heading above point, if it is an issue."
   (when (and (org-linear--file-p) (not (org-before-first-heading-p)))
     (save-excursion
       (org-back-to-heading t)
-      (while (and (> (org-outline-level) 2) (org-up-heading-safe)))
-      (when (and (= (org-outline-level) 2) (org-linear--issue-heading-p))
-        (org-linear--marker)))))
+      (if (org-linear--mirror-hierarchy-p)
+          (progn
+            (while (and (not (org-linear--task-heading-p)) (org-up-heading-safe)))
+            (when (org-linear--task-heading-p)
+              (org-linear--marker)))
+        (while (and (> (org-outline-level) 2) (org-up-heading-safe)))
+        (when (and (= (org-outline-level) 2) (org-linear--issue-heading-p))
+          (org-linear--marker))))))
 
 (defun org-linear--issue-heading-p ()
   "Return non-nil if the level-2 heading at point is an issue.
@@ -902,7 +947,10 @@ the last sync and no project, whose ID is nil.  Its own project is left out."
   (with-current-buffer (marker-buffer marker)
     (org-with-wide-buffer
      (let ((headings (plist-get (org-linear--index) :projects))
-           (current (org-with-point-at marker (org-linear--heading-project)))
+           (current (org-with-point-at marker
+                      (if (org-linear--mirror-hierarchy-p)
+                          (plist-get (org-linear--tree-relations) :project)
+                        (org-linear--heading-project))))
            choices)
        (maphash (lambda (id heading)
                   (unless (equal id "none")
@@ -918,11 +966,21 @@ the last sync and no project, whose ID is nil.  Its own project is left out."
                    (nreverse (cons (list "No project") choices)))))))
 
 (defun org-linear--move-and-save (marker project)
-  "Move the issue at MARKER to PROJECT, an ID or nil, and save its file."
+  "Move the issue at MARKER to PROJECT, an ID or nil, and save its file.
+With a hierarchy, it leaves its milestone, which belongs to its old
+project, and keeps its parent: under it, if the parent is in PROJECT
+and no milestone, or else in LINEAR_PARENT."
   (with-current-buffer (marker-buffer marker)
     (org-with-wide-buffer
-     (org-linear--move-to-project marker project (org-linear--projects)
-                                  (org-linear--index)))
+     (let ((index (org-linear--index)))
+       (if (org-linear--mirror-hierarchy-p)
+           (let ((org-linear--apply-index index)
+                 (org-linear--placements (make-hash-table :test #'eq))
+                 (org-linear--removals nil))
+             (org-linear--want marker :project project)
+             (org-linear--want marker :milestone nil)
+             (org-linear--place-all index (org-linear--projects)))
+         (org-linear--move-to-project marker project (org-linear--projects) index))))
     (save-buffer)))
 
 ;;;###autoload
@@ -992,7 +1050,20 @@ Issues whose headings hold edits or notes not yet in Linear stay."
      ((null base) "has not been synced yet")
      ((not (member (org-with-point-at marker (org-get-todo-state)) org-done-keywords))
       "is open, so the sync would bring it back")
+     ((org-linear--holds-sub-issues-p marker)
+      "holds sub-issues; archive or move them first")
      ((not (org-linear--unchanged-p marker base)) org-linear--unsent-refusal))))
+
+(defun org-linear--holds-sub-issues-p (marker)
+  "Return non-nil if an issue heading lies under the heading at MARKER."
+  (org-with-point-at marker
+    (let ((end (save-excursion (org-end-of-subtree t t) (point)))
+          found)
+      (end-of-line)
+      (while (and (not found) (re-search-forward org-outline-regexp-bol end t))
+        (setq found (org-entry-get nil "LINEAR_UUID"))
+        (end-of-line))
+      (and found t))))
 
 (defun org-linear--archive-issues (issues)
   "Archive ISSUES, a list of (ID . MARKER), and save what changed.
@@ -1153,10 +1224,16 @@ comments(first: 100) { nodes { id body createdAt parent { id } user { id name } 
 
 (defun org-linear--issue-query-fields ()
   "Return the issue fields the sync reads in the profile in effect."
-  (if (and (eq org-linear-layout 'in-place)
-           (or org-linear-project-keywords org-linear-milestone-keywords))
+  (if (or (and (eq org-linear-layout 'in-place)
+               (or org-linear-project-keywords org-linear-milestone-keywords))
+          (org-linear--mirror-hierarchy-p))
       (concat org-linear--issue-fields "\n" org-linear--relation-fields)
     org-linear--issue-fields))
+
+(defun org-linear--mirror-hierarchy-p ()
+  "Return non-nil if the mirror layout shows milestones and sub-issues.
+It does when `org-linear-milestone-keywords' is set."
+  (and (not (eq org-linear-layout 'in-place)) org-linear-milestone-keywords t))
 
 (defun org-linear--fetch (buffer callback)
   "Fetch the teams' metadata and issues, then call CALLBACK with them.
@@ -1173,13 +1250,44 @@ set are fetched too, so that their edits still sync."
    `((keys . ,(vconcat org-linear-teams)))
    (lambda (meta)
      (setq org-linear--meta (org-linear--parse-meta meta))
-     (org-linear--fetch-issues
-      (org-linear--scope-filter) nil nil
-      (lambda (issues)
-        (org-linear--fetch-missing
-         buffer issues
-         (lambda (all)
-           (funcall callback (org-linear--normalize all)))))))))
+     (org-linear--fetch-milestones
+      nil nil
+      (lambda ()
+        (org-linear--fetch-issues
+         (org-linear--scope-filter) nil nil
+         (lambda (issues)
+           (org-linear--fetch-missing
+            buffer issues
+            (lambda (all)
+              (funcall callback (org-linear--normalize all)))))))))))
+
+(defun org-linear--fetch-milestones (after acc callback)
+  "Fetch the milestones of the teams' projects from cursor AFTER onto ACC.
+Record them in `org-linear--meta' as :milestones, then call CALLBACK.
+Only the mirror layout with a hierarchy fetches them; otherwise CALLBACK
+is called at once."
+  (if (not (org-linear--mirror-hierarchy-p))
+      (funcall callback)
+    (require 'org-linear-in-place)
+    (org-linear--graphql
+     (format "query OrgLinearMilestones($keys: [String!], $after: String) {
+  projectMilestones(first: 100, after: $after,
+    filter: { project: { accessibleTeams: { some: { key: { in: $keys } } } } }) {
+    pageInfo { hasNextPage endCursor } nodes { %s } } }"
+             (alist-get 'milestone org-linear-in-place--object-fields))
+     `((keys . ,(vconcat org-linear-teams)) (after . ,(or after :null)))
+     (lambda (data)
+       (let* ((page (alist-get 'projectMilestones data))
+              (acc (append acc (mapcar (lambda (node) (org-linear-in-place--object 'milestone node))
+                                       (alist-get 'nodes page))))
+              (info (alist-get 'pageInfo page)))
+         (if (eq (alist-get 'hasNextPage info) t)
+             (org-linear--fetch-milestones (alist-get 'endCursor info) acc callback)
+           (let ((ids (make-hash-table :test #'equal)))
+             (dolist (milestone acc) (puthash (plist-get milestone :id) t ids))
+             (setq org-linear--meta (plist-put (plist-put org-linear--meta :milestones acc)
+                                               :milestone-ids ids)))
+           (funcall callback)))))))
 
 (defun org-linear--scope-filter ()
   "Return the issue filter for the teams' open and recently closed issues."
@@ -1257,7 +1365,8 @@ set are fetched too, so that their edits still sync."
     (org-linear--remember-tags)
     `((tasks . ,(nreverse tasks))
       (comments . ,(nreverse comments))
-      (projects . ,(org-linear--projects)))))
+      (projects . ,(org-linear--projects))
+      (milestones . ,(plist-get org-linear--meta :milestones)))))
 
 (defun org-linear--projects ()
   "Return the teams' projects from the last sync, as the sync's data holds them."
@@ -1463,6 +1572,10 @@ comments included, since it will be inserted again."
           (push (cons (cons 'comment (alist-get 'id comment))
                       (alist-get 'body comment))
                 items))))
+    (dolist (milestone (alist-get 'milestones data))
+      (let ((base (gethash (plist-get milestone :id) (org-linear--state-objects))))
+        (unless (and base (equal (plist-get milestone :md) (plist-get base :desc-md)))
+          (push (cons (cons 'desc (plist-get milestone :id)) (plist-get milestone :md)) items))))
     (nreverse items)))
 
 (defconst org-linear--pandoc-jobs 8
@@ -1532,7 +1645,10 @@ An Org heading inside an issue's body would split the issue."
 ;;;; Sync: merge and apply
 
 (defun org-linear--on-converted (buffer data converted)
-  "Merge DATA, with CONVERTED texts, into BUFFER, then send the edits."
+  "Merge DATA, with CONVERTED texts, into BUFFER, then send the edits.
+The file is read in slices first, which change nothing; then Linear's
+changes are applied at once, so that the file and the sync state never
+disagree."
   (cond
    ((buffer-modified-p buffer)
     (org-linear--log "Not applied: the file has unsaved edits; save it to sync")
@@ -1540,18 +1656,109 @@ An Org heading inside an issue's body would split the issue."
    ((not (verify-visited-file-modtime buffer))
     (org-linear--fail "the file changed on disk; revert its buffer, then sync"))
    (t
-    (let ((org-linear--archive 'unknown)
-          ops)
-      (with-current-buffer buffer
-        (setq ops (org-linear--with-sync-edits
-                   (lambda () (org-linear--apply data converted)))))
-      ;; The archive first: a save cut short then leaves an issue in both
-      ;; files rather than in neither.
-      (when (bufferp org-linear--archive)
-        (org-linear--save org-linear--archive))
-      (org-linear--save buffer)
-      (org-linear--save-state)
-      (org-linear--run-ops ops)))))
+    (org-linear--read-in-slices
+     buffer data converted
+     (lambda (index quiet views)
+       (org-linear--apply-and-send buffer data converted index quiet views))))))
+
+(defun org-linear--apply-and-send (buffer data converted index quiet views)
+  "Apply DATA, with CONVERTED texts, to BUFFER, save it, and send the edits.
+INDEX, QUIET and VIEWS are what `org-linear--read-in-slices' read."
+  (let ((org-linear--archive 'unknown)
+        (org-linear--views views)
+        ops)
+    (with-current-buffer buffer
+      (setq ops (org-linear--with-sync-edits
+                 (lambda () (org-linear--apply data converted index quiet)))))
+    ;; The archive first: a save cut short then leaves an issue in both
+    ;; files rather than in neither.
+    (when (bufferp org-linear--archive)
+      (org-linear--save org-linear--archive))
+    (org-linear--save buffer)
+    (org-linear--save-state)
+    (org-linear--run-ops ops)))
+
+(defun org-linear--read-in-slices (buffer data converted callback)
+  "Read BUFFER for DATA in slices, then call CALLBACK with what was read.
+CALLBACK gets the index of the file, a hash table of the IDs of the
+issues that need no change on either side, and the views of the others'
+headings, as `org-linear--views' holds them.  Reading changes nothing,
+and between slices Emacs handles input, so that a sync never blocks it
+for long.  If BUFFER changes meanwhile, nothing is applied: the log says
+so and the next sync starts afresh.  CONVERTED maps conversion keys to
+Org text."
+  (require 'org-linear-in-place)
+  (let* ((tick (buffer-chars-modified-tick buffer))
+         (job (with-current-buffer buffer (org-linear--index-job)))
+         (comments (org-linear--comments-by-issue data converted))
+         (tasks (alist-get 'tasks data))
+         (quiet (make-hash-table :test #'equal))
+         (views (make-hash-table :test #'eq))
+         changed)
+    (org-linear-in-place--run-slices
+     (lambda ()
+       (cond
+        ((or (not (buffer-live-p buffer))
+             (buffer-modified-p buffer)
+             (/= tick (buffer-chars-modified-tick buffer)))
+         (setq changed t)
+         nil)
+        ((not (plist-get job :done))
+         (with-current-buffer buffer
+           (org-with-wide-buffer (org-linear--index-step job)))
+         t)
+        (tasks
+         (with-current-buffer buffer
+           (org-with-wide-buffer
+            (org-linear--read-task (pop tasks) converted comments (plist-get job :index)
+                                   quiet views)))
+         t)))
+     (lambda ()
+       (if changed
+           (progn
+             (org-linear--log "Not applied: the file changed while the sync read it; the next sync applies Linear's changes")
+             (org-linear--finish))
+         (funcall callback (plist-get job :index) quiet views))))))
+
+(defun org-linear--read-task (task converted comments index quiet views)
+  "Read the heading of TASK in INDEX and record whether the merge must apply it.
+An issue whose heading, Linear and the last sync agree on every field,
+with no new comment or note, goes into QUIET, the IDs that need only
+their state refreshed.  The view of any other heading goes into VIEWS.
+CONVERTED maps conversion keys to Org text; COMMENTS maps issue IDs to
+their new comments."
+  (let* ((id (alist-get 'id task))
+         (marker (gethash id (plist-get index :tasks)))
+         (base (gethash id (org-linear--state-tasks))))
+    (when (and marker (not (gethash id (plist-get index :duplicates))))
+      (let ((local (org-linear--read-view marker)))
+        (if (org-linear--quiet-p task converted (gethash id comments) marker base local)
+            (puthash id t quiet)
+          (puthash marker local views))))))
+
+(defun org-linear--quiet-p (task converted comments marker base local)
+  "Return non-nil if TASK needs no change on either side.
+That is when its heading at MARKER, whose view is LOCAL, Linear and
+BASE, the last sync's state, agree on every field, the issue is in the
+file's scope and not deleted, the heading's properties are current and
+it has no new note, and Linear no new comment, in COMMENTS.  CONVERTED
+maps conversion keys to Org text."
+  (and base
+       (null comments)
+       (not (eq (alist-get 'trashed task) t))
+       (org-linear--in-scope-p task)
+       (null (car (org-linear--split-description (plist-get base :body))))
+       (let ((remote (org-linear--remote-view task converted base)))
+         (cl-every (lambda (field)
+                     (and (equal (plist-get local field) (plist-get remote field))
+                          (equal (plist-get local field) (plist-get base field))))
+                   (org-linear--merge-fields)))
+       (org-with-point-at marker
+         (and (equal (org-entry-get nil "LINEAR_ID") (alist-get 'identifier task))
+              (equal (org-entry-get nil "LINEAR_URL") (alist-get 'url task))))
+       (cl-every (lambda (note)
+                   (member (org-linear--note-key (cdr note)) (plist-get base :note-keys)))
+                 (org-linear--local-notes marker))))
 
 (defun org-linear--with-sync-edits (edit)
   "Call EDIT in the current buffer as the sync, and return its value.
@@ -1571,26 +1778,62 @@ changes made in Linear, and the next save would send the reversal."
       (setq buffer-undo-list nil))
     value))
 
-(defun org-linear--apply (data converted)
+(defun org-linear--apply (data converted &optional index quiet)
   "Apply DATA to the current buffer and return the edits to send.
-CONVERTED maps conversion keys to Org text."
-  (let* ((index (org-linear--index))
+CONVERTED maps conversion keys to Org text.  INDEX is the buffer's index,
+read now if nil.  QUIET holds the IDs of the issues that need no change,
+whose state only takes Linear's last edit time and description."
+  (let* ((index (or index (org-linear--index)))
          (projects (alist-get 'projects data))
          (comments (org-linear--comments-by-issue data converted))
          (seen (make-hash-table :test #'equal))
-         ops)
+         (hierarchy (org-linear--mirror-hierarchy-p))
+         (org-linear--apply-index index)
+         (org-linear--placements (and hierarchy (make-hash-table :test #'eq)))
+         (org-linear--removals nil)
+         (org-linear--skipped-pending nil)
+         (object-ops (and hierarchy (org-linear--apply-milestones data converted index projects)))
+         ops creations)
     (org-linear--rename-projects projects index)
     (dolist (task (alist-get 'tasks data))
       (let ((id (alist-get 'id task)))
         (puthash id t seen)
-        (setq ops (nconc ops (org-linear--apply-task
-                              task converted (gethash id comments) projects index)))))
+        (if (and quiet (gethash id quiet))
+            (org-linear--refresh-quiet task)
+          (setq ops (nconc ops (org-linear--apply-task
+                                task converted (gethash id comments) projects index))))))
     (maphash (lambda (id marker)
                (unless (gethash id seen)
-                 (org-linear--remove-if-unchanged id marker "left Linear")))
+                 (org-linear--remove-later
+                  id marker (lambda () (org-linear--remove-if-unchanged id marker "left Linear")))))
              (plist-get index :tasks))
     (org-linear--prune-archived seen)
-    (nconc ops (org-linear--creation-ops index))))
+    (when hierarchy
+      (org-linear--place-all index projects)
+      (org-linear--run-removals index)
+      (org-linear--remove-vanished-milestones data index))
+    (setq creations (append (and hierarchy (org-linear--milestone-creation-ops index))
+                            (org-linear--creation-ops index)))
+    (when (and org-linear--skipped-pending creations)
+      (setq org-linear--rerun t))
+    (append object-ops ops creations)))
+
+(defun org-linear--refresh-quiet (task)
+  "Record in TASK's state Linear's last edit and description, as a merge would."
+  (let* ((id (alist-get 'id task))
+         (base (copy-sequence (gethash id (org-linear--state-tasks)))))
+    (setq base (plist-put base :desc-md (alist-get 'description task)))
+    (puthash id (plist-put base :edited (alist-get 'last_edited_time task))
+             (org-linear--state-tasks))))
+
+(defun org-linear--remove-later (id marker function)
+  "Call FUNCTION, which removes the heading at MARKER of issue ID.
+With a hierarchy, record it to be called once the sync has placed the
+headings, and mark the sub-issues under it to move out first."
+  (if (null org-linear--placements)
+      (funcall function)
+    (push (cons id function) org-linear--removals)
+    (org-linear--free-descendants marker)))
 
 (defun org-linear--prune-archived (seen)
   "Forget archived issues not in SEEN, the IDs this sync fetched.
@@ -1616,15 +1859,18 @@ holds unsent edits, and its heading goes once it has none."
       nil)
      ((eq (alist-get 'trashed task) t)
       (if marker
-          (org-linear--remove-deleted id marker)
+          (org-linear--remove-later id marker (lambda () (org-linear--remove-deleted id marker)))
         (remhash id (org-linear--state-tasks)))
       nil)
      (marker
       (let ((ops (org-linear--merge task converted comments projects index marker base)))
         (when (and (null ops) (not (org-linear--in-scope-p task)))
-          (if org-linear-archive-file
-              (org-linear--archive-heading id marker)
-            (org-linear--remove-if-unchanged id marker nil)))
+          (org-linear--remove-later
+           id marker
+           (lambda ()
+             (if org-linear-archive-file
+                 (org-linear--archive-heading id marker)
+               (org-linear--remove-if-unchanged id marker nil)))))
         (when (and ops (org-linear--leaves-once-sent-p marker))
           (setq org-linear--rerun t))
         ops))
@@ -1670,6 +1916,10 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
             (r (plist-get remote field))
             (b (plist-get base field)))
         (cond
+         ((or (memq l '(pending unknown)) (memq r '(pending unknown)))
+          ;; A relation to a heading not yet in Linear, or to a milestone
+          ;; the file cannot show, waits; the base keeps what it was.
+          (when (eq l 'pending) (setq org-linear--skipped-pending t)))
          ((equal l r) (setq new-base (plist-put new-base field r)))
          ((equal l b)
           (org-linear--set-field marker field r task projects index)
@@ -1688,6 +1938,8 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
           (org-linear--conflict task field l r)
           (setq new-base (plist-put new-base field r))))))
     (org-linear--set-static-properties marker task)
+    (when org-linear--placements
+      (org-linear--drop-nested-flat-parent marker))
     (setq new-base (org-linear--insert-comments marker comments new-base))
     (setq new-base (plist-put new-base :desc-md (alist-get 'description task)))
     (setq new-base (plist-put new-base :edited (alist-get 'last_edited_time task)))
@@ -1696,9 +1948,9 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
 
 (defun org-linear--merge-fields ()
   "Return the fields the merge compares, which depend on the layout."
-  (if (eq org-linear-layout 'in-place)
-      (remq :project org-linear--fields)
-    org-linear--fields))
+  (cond ((eq org-linear-layout 'in-place) (remq :project org-linear--fields))
+        ((org-linear--mirror-hierarchy-p) (append org-linear--fields '(:milestone :parent)))
+        (t org-linear--fields)))
 
 (defun org-linear--ops-for (task pushed marker base)
   "Return the edits that send the PUSHED fields and new notes of TASK.
@@ -1730,6 +1982,7 @@ BASE its state."
                     ('update (list 'update (plist-get op :fields)))
                     ('note (list 'note (plist-get op :key)))
                     ('add (list 'add (plist-get op :view)))
+                    ('milestone-add (list 'milestone-add (plist-get op :view)))
                     ('object-add (list 'object-add (plist-get op :kind) (plist-get op :view)))
                     ('object-update (list 'object-update (plist-get op :kind)
                                           (plist-get op :fields)))
@@ -1841,7 +2094,9 @@ The date itself arrives as a change from Linear.  MARKER is the heading."
       (org-with-point-at marker
         (let ((local (org-linear--split-description (org-linear--body))))
           (when (car local)
-            (org-linear--set-body (cdr local)))))
+            (org-linear--set-body (cdr local))
+            (when org-linear--views
+              (remhash marker org-linear--views)))))
       (plist-put (copy-sequence base) :body (cdr split)))))
 
 ;;;; Sending edits
@@ -1864,6 +2119,7 @@ with nothing to send is skipped."
     ('update (org-linear--run-update op next))
     ('note (org-linear--run-note op next))
     ('add (org-linear--run-add op next))
+    ('milestone-add (org-linear--run-milestone-add op next))
     ('archive (org-linear-in-place--run-archive op next))
     ((or 'object-add 'object-update 'object-relate 'object-archive)
      (org-linear-in-place--run-object op next))))
@@ -1952,6 +2208,8 @@ LABEL-IDS are the issue's labels now, for the tags."
     (:priority `((priority . ,(org-linear--cookie-priority value))))
     (:deadline `((dueDate . ,(or value :null))))
     (:project `((projectId . ,(or value :null))))
+    (:milestone `((projectMilestoneId . ,(or value :null))))
+    (:parent `((parentId . ,(or value :null))))
     (:tags (org-linear--tags-input value team label-ids))
     ((or :body :scheduled) nil)))
 
@@ -2077,8 +2335,10 @@ answer was lost is then found by the next sync instead of repeated."
 
 (defun org-linear--create (op id next)
   "Create the Linear issue of OP with ID, then call NEXT."
-  (let ((view (plist-get op :view))
-        (team (plist-get op :team)))
+  (let* ((view (plist-get op :view))
+         (team (plist-get op :team))
+         (added (org-linear--added-relations op))
+         (op (if added (append op (list :added added)) op)))
     (org-linear--org-to-md
      (plist-get view :body)
      (lambda (body-md)
@@ -2095,6 +2355,7 @@ answer was lost is then found by the next sync instead of repeated."
                                 (org-linear--field-input :project (plist-get view :project) team))
                               (org-linear--tags-input (plist-get view :tags) team nil)
                               (org-linear--relation-input (plist-get op :relations) t)
+                              (org-linear--relation-input added t)
                               (org-linear--new-issue-assignee))
                       nil start (and start t) team)))
          (org-linear--graphql
@@ -2106,6 +2367,17 @@ answer was lost is then found by the next sync instead of repeated."
              op md (org-linear--task (alist-get 'issue (alist-get 'issueCreate data))) next))
           (org-linear--rejected-handler op next)))))))
 
+(defun org-linear--sent-view (op)
+  "Return the view of OP's new issue as it was sent.
+Its relations are those it was created with, if they differ from the
+view's, which may wait for headings not yet in Linear."
+  (let ((view (plist-get op :view)))
+    (if-let* ((added (plist-get op :added)))
+        (plist-put (plist-put (org-linear--known-values view)
+                              :milestone (plist-get added :milestone))
+                   :parent (plist-get added :parent))
+      view)))
+
 (defun org-linear--new-issue-assignee ()
   "Return the input that assigns a new issue to the owner of the API key.
 It is nil unless `org-linear-assign-new-issues' is set in the in-place
@@ -2116,7 +2388,7 @@ layout; the mirror layout takes the assignee from the heading's tags."
 (defun org-linear--finish-create (op md task next)
   "Link TASK, created for OP with description MD, to its heading; then NEXT.
 A new issue with a start date is snoozed too."
-  (let* ((view (plist-get op :view))
+  (let* ((view (org-linear--sent-view op))
          (start (plist-get view :scheduled)))
     (org-linear--link-created (plist-get op :marker) view md task)
     (if-let* ((snooze (and start (org-linear--snooze-input
@@ -2152,7 +2424,7 @@ too.  The issue exists by now, so a refusal is only logged."
 This is the mirror layout's way.  The base keeps the description as
 Linear stored it, which Linear rewrites on the way in (link and list
 syntax, trailing spaces), so that the rewrite is not taken for an edit."
-  (let ((base (append (copy-sequence view)
+  (let ((base (append (org-linear--known-values view)
                       (list :desc-md (org-linear--stored-description task md)
                             :edited (alist-get 'last_edited_time task)
                             :comment-ids nil
@@ -2178,9 +2450,12 @@ syntax, trailing spaces), so that the rewrite is not taken for an edit."
 (defun org-linear--created-heading (marker title)
   "Return a marker at the heading new issue TITLE was created from, or nil.
 MARKER is where it was when the sync read it; the user may have moved it
-since.  Only a level-2 heading with that title and no Linear ID counts."
+since.  Only a heading at an issue's level, 2 or deeper with a hierarchy, with
+that title and no Linear ID counts."
   (let ((matches-p (lambda ()
-                     (and (= (org-outline-level) 2)
+                     (and (if (org-linear--mirror-hierarchy-p)
+                              (> (org-outline-level) 1)
+                            (= (org-outline-level) 2))
                           (equal (org-get-heading t t t t) title)
                           (not (org-entry-get nil "LINEAR_UUID"))))))
     (or (org-with-point-at marker
@@ -2313,18 +2588,31 @@ is logged."
 CONVERTED maps conversion keys to Org text; BASE supplies the body when
 the description is unchanged."
   (let ((start (car (org-linear--split-description (alist-get 'description task)))))
-    (list :title (alist-get 'title task)
-          :todo (org-linear--remote-keyword task base)
-          :priority (org-linear--remote-cookie task base)
-          :tags (org-linear--without-start-tag (org-linear--remote-tags task) start)
-          :deadline (alist-get 'due task)
-          :scheduled start
-          :project (alist-get 'project_id task)
-          :body (or (and org-linear--body-overrides
-                         (gethash (alist-get 'id task) org-linear--body-overrides))
-                    (gethash (cons 'desc (alist-get 'id task)) converted)
-                    (plist-get base :body)
-                    ""))))
+    (append
+     (list :title (alist-get 'title task)
+           :todo (org-linear--remote-keyword task base)
+           :priority (org-linear--remote-cookie task base)
+           :tags (org-linear--without-start-tag (org-linear--remote-tags task) start)
+           :deadline (alist-get 'due task)
+           :scheduled start
+           :project (alist-get 'project_id task)
+           :body (or (and org-linear--body-overrides
+                          (gethash (alist-get 'id task) org-linear--body-overrides))
+                     (gethash (cons 'desc (alist-get 'id task)) converted)
+                     (plist-get base :body)
+                     ""))
+     (when (org-linear--mirror-hierarchy-p)
+       (list :milestone (org-linear--remote-milestone task)
+             :parent (alist-get 'parent_id task))))))
+
+(defun org-linear--remote-milestone (task)
+  "Return the ID of TASK's milestone, nil, or `unknown'.
+A milestone the sync did not fetch, which the file cannot show, is
+`unknown', so that the merge leaves the relation alone."
+  (when-let* ((id (alist-get 'milestone_id task)))
+    (if (gethash id (or (plist-get org-linear--meta :milestone-ids) (make-hash-table)))
+        id
+      'unknown)))
 
 (defun org-linear--remote-cookie (task base)
   "Return the priority cookie that stands for TASK's priority.
@@ -2366,23 +2654,40 @@ otherwise, from the default value of `org-todo-keywords'."
      (t (car all)))))
 
 (defun org-linear--local-view (marker)
-  "Return the issue at MARKER as Org field values."
+  "Return the issue at MARKER as Org field values.
+A view read before the sync applied anything, in `org-linear--views', is
+used once and forgotten, since the sync's own edits make it stale."
+  (if-let* ((view (and org-linear--views (gethash marker org-linear--views))))
+      (progn (remhash marker org-linear--views) view)
+    (org-linear--read-view marker)))
+
+(defun org-linear--read-view (marker)
+  "Return the issue at MARKER as Org field values, read from its heading.
+With a hierarchy in the mirror layout, they include the relations its
+place shows, as `org-linear--tree-relations' gives them."
   (org-with-point-at marker
-    (let ((start (and org-linear-start-date-label (org-linear--planning-date "SCHEDULED"))))
-      (list :title (substring-no-properties (org-get-heading t t t t))
-            :todo (when-let* ((todo (org-get-todo-state)))
-                    (substring-no-properties todo))
-            :priority (org-linear--heading-priority)
-            :tags (org-linear--without-start-tag
-                   (sort (append (seq-filter (lambda (tag) (member tag (org-linear--managed-tags)))
-                                             (org-get-tags nil t))
-                                 (org-linear--file-label-tags))
-                         #'string<)
-                   start)
-            :deadline (org-linear--planning-date "DEADLINE")
-            :scheduled start
-            :project (unless (eq org-linear-layout 'in-place) (org-linear--heading-project))
-            :body (org-linear--body)))))
+    (let ((start (and org-linear-start-date-label (org-linear--planning-date "SCHEDULED")))
+          (relations (and (org-linear--mirror-hierarchy-p) (org-linear--tree-relations))))
+      (append
+       (list :title (substring-no-properties (org-get-heading t t t t))
+             :todo (when-let* ((todo (org-get-todo-state)))
+                     (substring-no-properties todo))
+             :priority (org-linear--heading-priority)
+             :tags (org-linear--without-start-tag
+                    (sort (append (seq-filter (lambda (tag) (member tag (org-linear--managed-tags)))
+                                              (org-get-tags nil t))
+                                  (org-linear--file-label-tags))
+                          #'string<)
+                    start)
+             :deadline (org-linear--planning-date "DEADLINE")
+             :scheduled start
+             :project (cond ((eq org-linear-layout 'in-place) nil)
+                            (relations (plist-get relations :project))
+                            (t (org-linear--heading-project)))
+             :body (org-linear--body))
+       (when relations
+         (list :milestone (plist-get relations :milestone)
+               :parent (plist-get relations :parent)))))))
 
 (defun org-linear--file-label-tags ()
   "Return the tag of the current file's label, in a list, in the in-place layout."
@@ -2401,10 +2706,18 @@ otherwise, from the default value of `org-todo-keywords'."
 (defun org-linear--base-from-local (local marker)
   "Return a first sync state for the heading at MARKER whose fields are LOCAL.
 The heading's notes count as already sent."
-  (append (copy-sequence local)
+  (append (org-linear--known-values local)
           (list :note-keys (mapcar (lambda (n) (org-linear--note-key (cdr n)))
                                    (org-linear--local-notes marker))
                 :comment-ids nil)))
+
+(defun org-linear--known-values (view)
+  "Return a copy of VIEW with relations to headings not yet in Linear as nil.
+Such a relation was not sent, so the state must not hold it."
+  (let ((copy (copy-sequence view)))
+    (dolist (field '(:milestone :parent) copy)
+      (when (memq (plist-get copy field) '(pending unknown))
+        (setq copy (plist-put copy field nil))))))
 
 (defun org-linear--heading-priority ()
   "Return the priority cookie of the heading at point, as a string, or nil."
@@ -2559,7 +2872,10 @@ CONVERTED maps conversion keys to Org text."
 TASK is the Linear issue, for the closing date; PROJECTS and INDEX locate
 project headings."
   (pcase field
-    (:project (org-linear--move-to-project marker value projects index))
+    ((or :project :milestone :parent)
+     (if org-linear--placements
+         (org-linear--want marker field value)
+       (org-linear--move-to-project marker value projects index)))
     (_ (org-with-point-at marker
          (pcase field
            (:title (org-edit-headline value))
@@ -2644,13 +2960,17 @@ PROJECTS and INDEX locate the project heading."
     (setq marker (org-linear--marker pos))
     (org-with-point-at marker (org-align-tags))
     (org-linear--set-static-properties marker task)
-    (let ((base (append (copy-sequence view)
+    (let ((base (append (org-linear--known-values view)
                         (list :desc-md (alist-get 'description task)
                               :edited (alist-get 'last_edited_time task)
                               :note-keys nil :comment-ids nil))))
       (setq base (org-linear--insert-comments marker comments base))
       (puthash (alist-get 'id task) base (org-linear--state-tasks)))
     (puthash (alist-get 'id task) marker (plist-get index :tasks))
+    (when org-linear--placements
+      (dolist (field '(:milestone :parent))
+        (unless (memq (plist-get view field) '(pending unknown))
+          (org-linear--want marker field (plist-get view field)))))
     (org-linear--count :pulled)))
 
 (defun org-linear--heading-string (view completed &optional level)
@@ -2688,15 +3008,42 @@ by default."
 (defun org-linear--project-end (project projects index)
   "Return where a new issue of PROJECT goes, creating its heading if needed.
 PROJECTS are the teams' projects; INDEX maps project IDs to headings."
+  (org-linear--insertion-point (org-linear--project-heading project projects index)))
+
+(defun org-linear--project-heading (project projects index)
+  "Return the marker of PROJECT's heading, inserting the heading if missing.
+PROJECT is an ID or nil for no project; PROJECTS are the teams' projects;
+INDEX maps project IDs to headings."
   (let* ((key (or project "none"))
          (heading (gethash key (plist-get index :projects))))
     (unless heading
       (setq heading (org-linear--insert-project key projects))
       (puthash key heading (plist-get index :projects)))
-    (org-with-point-at heading
-      (org-end-of-subtree t t)
-      (unless (bolp) (insert "\n"))
-      (point))))
+    heading))
+
+(defun org-linear--insertion-point (container)
+  "Return where a heading goes as the last child of the heading at CONTAINER.
+Under a project heading with milestones, an issue goes before the first
+milestone, so that the project's own issues come first."
+  (org-with-point-at container
+    (or (and (org-linear--mirror-hierarchy-p)
+             (= (org-outline-level) 1)
+             (org-linear--first-milestone-child))
+        (progn
+          (org-end-of-subtree t t)
+          (unless (bolp) (insert "\n"))
+          (point)))))
+
+(defun org-linear--first-milestone-child ()
+  "Return the start of the first milestone heading among the children at point."
+  (save-excursion
+    (when (org-goto-first-child)
+      (catch 'found
+        (while t
+          (when (org-linear--milestone-heading-p)
+            (throw 'found (point)))
+          (unless (org-get-next-sibling)
+            (throw 'found nil)))))))
 
 (defun org-linear--insert-project (key projects)
   "Insert a level-1 heading for project KEY at the end; return its marker.
@@ -2855,7 +3202,7 @@ The sync saves the archive itself, before the file."
   "Return non-nil if the heading at MARKER matches BASE and has no new notes."
   (let ((local (org-linear--local-view marker)))
     (and (cl-every (lambda (field) (equal (plist-get local field) (plist-get base field)))
-                   org-linear--fields)
+                   (org-linear--merge-fields))
          (cl-every (lambda (note)
                      (member (org-linear--note-key (cdr note)) (plist-get base :note-keys)))
                    (org-linear--local-notes marker)))))
@@ -2868,38 +3215,616 @@ The sync saves the archive itself, before the file."
 ;;;; Index of the file
 
 (defun org-linear--index ()
-  "Index the current buffer's headings.
-Return a plist: :tasks maps issue IDs to issue heading markers, :projects
-maps project IDs (or \"none\") to project heading markers, :duplicates
-holds issue IDs with more than one heading, :new lists the markers of
-issue headings not yet in Linear, and :pending holds the IDs their
-creation was sent with."
-  (let ((tasks (make-hash-table :test #'equal))
-        (projects (make-hash-table :test #'equal))
-        (duplicates (make-hash-table :test #'equal))
-        (pending (make-hash-table :test #'equal))
-        new)
-    (goto-char (point-min))
-    (while (re-search-forward org-outline-regexp-bol nil t)
-      (let ((level (org-outline-level)))
+  "Index the current buffer's headings at once.
+Return the index `org-linear--index-job' describes."
+  (let ((job (org-linear--index-job)))
+    (while (not (plist-get job :done))
+      (org-linear--index-step job))
+    (plist-get job :index)))
+
+(defconst org-linear--index-headings-per-step 100
+  "Headings a step of the index reads.")
+
+(defun org-linear--index-job ()
+  "Return a new index of the current buffer, to fill with `org-linear--index-step'.
+It is a plist: :index is the index, :pos where the next step starts,
+:stack the headings above it and :done non-nil once it is complete.  The
+index is a plist: :tasks maps issue IDs to issue heading markers,
+:projects maps project IDs (or \"none\") to project heading markers,
+:duplicates holds issue IDs with more than one heading, :new lists the
+markers of issue headings not yet in Linear, and :pending holds the IDs
+their creation was sent with.  With a hierarchy, :milestones maps
+milestone IDs to milestone heading markers, :milestone-duplicates holds
+milestone IDs with more than one heading, and :new-milestones lists the
+markers of milestone headings not yet in Linear."
+  (list :index (list :tasks (make-hash-table :test #'equal)
+                     :projects (make-hash-table :test #'equal)
+                     :duplicates (make-hash-table :test #'equal)
+                     :new nil
+                     :pending (make-hash-table :test #'equal)
+                     :milestones (make-hash-table :test #'equal)
+                     :milestone-duplicates (make-hash-table :test #'equal)
+                     :new-milestones nil)
+        :pos (point-min) :stack nil :done nil))
+
+(defun org-linear--index-step (job)
+  "Index the next headings of the current buffer into JOB.
+See `org-linear--index-job'."
+  (let ((index (plist-get job :index))
+        (count 0))
+    (goto-char (plist-get job :pos))
+    (while (and (< count org-linear--index-headings-per-step)
+                (re-search-forward org-outline-regexp-bol nil t))
+      (if (org-linear--mirror-hierarchy-p)
+          (org-linear--index-nested job)
+        (org-linear--index-flat index))
+      (end-of-line)
+      (cl-incf count))
+    (plist-put job :pos (point))
+    (when (< count org-linear--index-headings-per-step)
+      (plist-put index :new (nreverse (plist-get index :new)))
+      (plist-put index :new-milestones (nreverse (plist-get index :new-milestones)))
+      (plist-put job :done t))))
+
+(defun org-linear--index-flat (index)
+  "Add the heading at point to INDEX, where issues are level-2 headings."
+  (let ((level (org-outline-level)))
+    (cond
+     ((= level 1) (org-linear--index-project index))
+     ((= level 2)
+      (let ((uuid (org-entry-get nil "LINEAR_UUID")))
         (cond
-         ((= level 1)
-          (when-let* ((id (org-entry-get nil "LINEAR_PROJECT")))
-            (puthash id (org-linear--marker) projects)))
-         ((= level 2)
-          (let ((uuid (org-entry-get nil "LINEAR_UUID")))
-            (cond
-             ((and uuid (gethash uuid tasks)) (puthash uuid t duplicates))
-             (uuid (puthash uuid (org-linear--marker) tasks))
-             ((and (org-get-todo-state)
-                   (save-excursion (org-up-heading-safe)
-                                   (org-entry-get nil "LINEAR_PROJECT")))
-              (when-let* ((id (org-entry-get nil "LINEAR_PENDING_UUID")))
-                (puthash id t pending))
-              (push (org-linear--marker) new))))))
-        (end-of-line)))
-    (list :tasks tasks :projects projects :duplicates duplicates :new (nreverse new)
-          :pending pending)))
+         (uuid (org-linear--index-task index uuid))
+         ((and (org-get-todo-state)
+               (save-excursion (org-up-heading-safe)
+                               (org-entry-get nil "LINEAR_PROJECT")))
+          (org-linear--index-new index))))))))
+
+(defun org-linear--index-nested (job)
+  "Add the heading at point to JOB's index, where issues nest.
+A level-2 heading under a project heading is a milestone by its keyword
+or its ID; a heading with an issue ID is an issue wherever it is; and a
+heading with a TODO keyword is a new issue when only issue and milestone
+headings come between it and its project heading."
+  (let* ((index (plist-get job :index))
+         (level (org-outline-level))
+         (stack (seq-drop-while (lambda (entry) (>= (car entry) level))
+                                (plist-get job :stack)))
+         (above (car stack))
+         (uuid (and (> level 1) (org-entry-get nil "LINEAR_UUID")))
+         (keyword (org-get-todo-state))
+         (kind (cond
+                ((= level 1) (org-linear--index-project index) 'project)
+                ((and (= level 2) (null uuid) (eq (nth 1 above) 'project)
+                      (org-linear--milestone-heading-p))
+                 (org-linear--index-milestone index)
+                 'milestone)
+                (uuid (org-linear--index-task index uuid) 'task)
+                ((and keyword (nth 2 above)
+                      (not (member keyword org-linear-milestone-keywords)))
+                 (org-linear--index-new index)
+                 'task)
+                (t 'other)))
+         (chained (if (eq kind 'project)
+                      (and (org-entry-get nil "LINEAR_PROJECT") t)
+                    (and (memq kind '(milestone task)) (nth 2 above) t))))
+    (plist-put job :stack (cons (list level kind chained) stack))))
+
+(defun org-linear--index-project (index)
+  "Add the project heading at point to INDEX, if it has a project."
+  (when-let* ((id (org-entry-get nil "LINEAR_PROJECT")))
+    (puthash id (org-linear--marker) (plist-get index :projects))))
+
+(defun org-linear--index-task (index uuid)
+  "Add the heading at point, of the issue UUID, to INDEX."
+  (if (gethash uuid (plist-get index :tasks))
+      (puthash uuid t (plist-get index :duplicates))
+    (puthash uuid (org-linear--marker) (plist-get index :tasks))))
+
+(defun org-linear--index-new (index)
+  "Add the heading at point, an issue not yet in Linear, to INDEX."
+  (when-let* ((id (org-entry-get nil "LINEAR_PENDING_UUID")))
+    (puthash id t (plist-get index :pending)))
+  (plist-put index :new (cons (org-linear--marker) (plist-get index :new))))
+
+(defun org-linear--index-milestone (index)
+  "Add the milestone heading at point to INDEX."
+  (if-let* ((id (org-entry-get nil "LINEAR_MILESTONE")))
+      (if (gethash id (plist-get index :milestones))
+          (puthash id t (plist-get index :milestone-duplicates))
+        (puthash id (org-linear--marker) (plist-get index :milestones)))
+    (plist-put index :new-milestones
+               (cons (org-linear--marker) (plist-get index :new-milestones)))))
+
+(defun org-linear--milestone-heading-p ()
+  "Return non-nil if the heading at point, under a project, is a milestone.
+It is if it is a level-2 heading with a milestone's ID, or a keyword of
+`org-linear-milestone-keywords', and no issue."
+  (and (= (org-outline-level) 2)
+       (not (org-entry-get nil "LINEAR_UUID"))
+       (or (org-entry-get nil "LINEAR_MILESTONE")
+           (org-entry-get nil "LINEAR_PENDING_MILESTONE")
+           (member (org-get-todo-state) org-linear-milestone-keywords))
+       t))
+
+;;;; Milestones and sub-issues in the mirror layout
+
+(defun org-linear--tree-relations ()
+  "Return the relations the place of the issue heading at point shows.
+A plist: :project is the ID of the project heading it is under, :milestone
+that of the milestone heading it is under, and :parent that of the
+nearest issue heading above it, or else its LINEAR_PARENT property, which
+the sync keeps for a sub-issue that cannot sit under its parent.  A
+heading not yet in Linear stands as `pending'."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((own (org-entry-get nil "LINEAR_PARENT"))
+          project milestone parent)
+      (while (org-up-heading-safe)
+        (cond
+         ((= (org-outline-level) 1)
+          (setq project (org-linear--heading-project-id)))
+         ((org-linear--milestone-heading-p)
+          (setq milestone (or (org-entry-get nil "LINEAR_MILESTONE") 'pending)))
+         ((and (null parent) (org-linear--task-heading-p))
+          (setq parent (or (org-entry-get nil "LINEAR_UUID") 'pending)))))
+      (list :project project :milestone milestone
+            :parent (or parent (and own (not (string-empty-p own)) own))))))
+
+(defun org-linear--heading-project-id ()
+  "Return the Linear project ID of the project heading at point, or nil."
+  (let ((id (org-entry-get nil "LINEAR_PROJECT")))
+    (unless (member id '(nil "" "none")) id)))
+
+(defun org-linear--task-heading-p ()
+  "Return non-nil if the heading at point, below level 1, is an issue's.
+It is if it has an issue ID, or a TODO keyword other than a milestone's."
+  (and (> (org-outline-level) 1)
+       (or (org-entry-get nil "LINEAR_UUID")
+           (let ((keyword (org-get-todo-state)))
+             (and keyword (not (member keyword org-linear-milestone-keywords)))))
+       t))
+
+(defun org-linear--want (marker field value)
+  "Record that the issue heading at MARKER must show VALUE as its relation FIELD."
+  (puthash marker (plist-put (gethash marker org-linear--placements) field value)
+           org-linear--placements))
+
+(defun org-linear--pin (marker)
+  "Record that the heading at MARKER keeps the relations its place shows now.
+Relations already recorded for it stay."
+  (puthash marker (org-linear--wanted marker) org-linear--placements))
+
+(defun org-linear--wanted (marker)
+  "Return the relations the heading at MARKER must show.
+Those recorded for it, and for the others those its place shows now."
+  (let ((wanted (copy-sequence (gethash marker org-linear--placements)))
+        (current (org-with-point-at marker (org-linear--tree-relations))))
+    (dolist (field '(:project :milestone :parent) wanted)
+      (unless (plist-member wanted field)
+        (setq wanted (plist-put wanted field (plist-get current field)))))))
+
+(defun org-linear--free-descendants (marker)
+  "Mark the issues under the heading at MARKER to be placed on their own.
+The heading leaves the file, so they keep their relations elsewhere."
+  (mapc #'org-linear--pin (org-linear--descendant-issues marker)))
+
+(defun org-linear--descendant-issues (marker)
+  "Return the markers of the issue headings under the heading at MARKER.
+Only issues in the index the sync applies count."
+  (let ((tasks (plist-get org-linear--apply-index :tasks))
+        markers)
+    (org-with-point-at marker
+      (let ((end (save-excursion (org-end-of-subtree t t) (point))))
+        (end-of-line)
+        (while (re-search-forward org-outline-regexp-bol end t)
+          (when-let* ((uuid (org-entry-get nil "LINEAR_UUID"))
+                      (child (gethash uuid tasks)))
+            (push child markers))
+          (end-of-line))))
+    (nreverse markers)))
+
+(defun org-linear--place-all (index projects)
+  "Move each issue heading the sync recorded to where its relations put it.
+A heading moves under its parent's heading when the two share project
+and milestone; otherwise under its milestone's heading or its project's,
+with its parent in LINEAR_PARENT.  The issues under a heading that moves
+are placed again in turn.  INDEX locates headings; PROJECTS are the
+teams' projects."
+  (let ((queue (hash-table-keys org-linear--placements))
+        (rounds 0))
+    (while (and queue (< rounds 5))
+      (setq queue (apply #'append
+                         (mapcar (lambda (marker) (org-linear--place marker index projects))
+                                 (sort queue #'<))))
+      (cl-incf rounds))
+    (dolist (marker queue)
+      (org-linear--log "Not placed: \"%s\" kept moving; check its relations in Linear"
+                       (org-with-point-at marker (org-get-heading t t t t))))))
+
+(defun org-linear--place (marker index projects)
+  "Move the issue heading at MARKER to where its relations put it.
+Return the markers of the issues under it, which must be placed again,
+when it moved.  A heading that leaves the file, or whose relations wait
+for a heading not yet in Linear, stays.  INDEX and PROJECTS are as in
+`org-linear--place-all'."
+  (unless (org-linear--leaving-p marker)
+    (let ((target (org-linear--destination marker (org-linear--wanted marker) index projects)))
+      (cond
+       ((null target) nil)
+       ((org-linear--placed-p marker target)
+        (org-linear--set-flat-parent marker (nth 2 target))
+        nil)
+       (t
+        (let ((children (org-linear--descendant-issues marker)))
+          (mapc #'org-linear--pin children)
+          (org-linear--move-subtree marker (nth 0 target) (nth 1 target) index)
+          (org-linear--set-flat-parent marker (nth 2 target))
+          children))))))
+
+(defun org-linear--leaving-p (marker)
+  "Return non-nil if the issue heading at MARKER leaves the file in this sync."
+  (when-let* ((uuid (org-entry-get marker "LINEAR_UUID")))
+    (and (assoc uuid org-linear--removals) t)))
+
+(defun org-linear--destination (marker wanted index projects)
+  "Return where the issue heading at MARKER goes to show the relations WANTED.
+That is (CONTAINER LEVEL PARENT): the marker of the heading it goes
+under, its level there and the parent it keeps in LINEAR_PARENT.  Return
+nil when it must stay: a relation waits for a heading not yet in Linear,
+or its milestone has no heading.  INDEX and PROJECTS are as in
+`org-linear--place-all'."
+  (let* ((project (plist-get wanted :project))
+         (milestone (plist-get wanted :milestone))
+         (parent (plist-get wanted :parent))
+         (parent-heading (and (stringp parent) (gethash parent (plist-get index :tasks))))
+         (milestone-heading (and (stringp milestone)
+                                 (gethash milestone (plist-get index :milestones)))))
+    (cond
+     ((or (memq milestone '(pending unknown)) (eq parent 'pending)) nil)
+     ((and parent-heading (org-linear--can-nest-p marker parent-heading project milestone))
+      (list parent-heading (1+ (org-with-point-at parent-heading (org-outline-level))) nil))
+     ((and milestone (not milestone-heading))
+      (org-linear--log "Not placed: no heading for the milestone of \"%s\""
+                       (org-with-point-at marker (org-get-heading t t t t)))
+      nil)
+     (milestone-heading (list milestone-heading 3 parent))
+     (t (list (org-linear--project-heading project projects index) 2 parent)))))
+
+(defun org-linear--can-nest-p (marker parent-heading project milestone)
+  "Return non-nil if the heading at MARKER can sit under PARENT-HEADING.
+It can if that heading stays in the file, lies outside its own subtree,
+and shows the same PROJECT and MILESTONE."
+  (and (not (org-linear--leaving-p parent-heading))
+       (not (org-linear--within-p parent-heading marker))
+       (let ((relations (org-with-point-at parent-heading (org-linear--tree-relations))))
+         (and (equal (plist-get relations :project) project)
+              (equal (plist-get relations :milestone) milestone)))))
+
+(defun org-linear--within-p (marker ancestor)
+  "Return non-nil if MARKER is in the subtree of the heading at ANCESTOR."
+  (and (eq (marker-buffer marker) (marker-buffer ancestor))
+       (>= marker ancestor)
+       (< marker (org-with-point-at ancestor (org-end-of-subtree t t) (point)))))
+
+(defun org-linear--placed-p (marker target)
+  "Return non-nil if the heading at MARKER already sits where TARGET says.
+TARGET is as `org-linear--destination' returns it."
+  (org-with-point-at marker
+    (and (= (org-outline-level) (nth 1 target))
+         (save-excursion
+           (and (org-up-heading-safe)
+                (= (point) (marker-position (nth 0 target))))))))
+
+(defun org-linear--drop-nested-flat-parent (marker)
+  "Remove LINEAR_PARENT from the heading at MARKER if it sits under an issue.
+Its place then shows its parent, as when you move it under its parent."
+  (when (org-entry-get marker "LINEAR_PARENT")
+    (org-with-point-at marker
+      (when (save-excursion
+              (catch 'found
+                (while (org-up-heading-safe)
+                  (when (org-linear--task-heading-p) (throw 'found t)))))
+        (org-entry-delete nil "LINEAR_PARENT")))))
+
+(defun org-linear--set-flat-parent (marker parent)
+  "Keep PARENT, an issue ID or nil, as the LINEAR_PARENT of the heading at MARKER."
+  (unless (equal (org-entry-get marker "LINEAR_PARENT") parent)
+    (if parent
+        (org-entry-put marker "LINEAR_PARENT" parent)
+      (org-entry-delete marker "LINEAR_PARENT"))))
+
+(defun org-linear--move-subtree (marker container level index)
+  "Move the subtree at MARKER under the heading at CONTAINER, at LEVEL.
+Its headings' levels shift to fit, and the markers of INDEX inside it
+move with it."
+  (let* ((beg (marker-position marker))
+         (end (org-with-point-at marker (org-end-of-subtree t t) (point)))
+         (old-level (org-with-point-at marker (org-outline-level)))
+         (inside (org-linear--markers-within beg end index))
+         (text (buffer-substring-no-properties beg end)))
+    (unless (string-suffix-p "\n" text)
+      (setq text (concat text "\n")))
+    (delete-region beg end)
+    (let ((pos (org-linear--insertion-point container))
+          (shifted (org-linear--shift-levels text (- level old-level) inside)))
+      (goto-char pos)
+      (insert (car shifted))
+      (set-marker marker pos)
+      (pcase-dolist (`(,inner . ,offset) (cdr shifted))
+        (set-marker inner (+ pos offset))))))
+
+(defun org-linear--markers-within (beg end index)
+  "Return (MARKER . OFFSET) for the heading markers of INDEX after BEG, before END.
+OFFSET is the marker's distance from BEG."
+  (let (inside)
+    (dolist (marker (append (hash-table-values (plist-get index :tasks))
+                            (plist-get index :new)))
+      (when (and (markerp marker) (> marker beg) (< marker end))
+        (push (cons marker (- marker beg)) inside)))
+    inside))
+
+(defun org-linear--shift-levels (text delta offsets)
+  "Return TEXT with each heading DELTA levels deeper, and OFFSETS updated.
+OFFSETS is a list of (MARKER . OFFSET) into TEXT, each at the start of a
+heading; the result is (NEW-TEXT . NEW-OFFSETS)."
+  (if (= delta 0)
+      (cons text offsets)
+    (let ((starts nil)
+          (start 0))
+      (while (string-match "^\\*+ " text start)
+        (push (match-beginning 0) starts)
+        (setq start (match-end 0)))
+      (cons (replace-regexp-in-string
+             "^\\*+ " (lambda (stars) (concat (make-string (+ (length stars) -1 delta) ?*) " "))
+             text t t)
+            (mapcar (lambda (pair)
+                      (cons (car pair)
+                            (+ (cdr pair)
+                               (* delta (cl-count-if (lambda (s) (< s (cdr pair))) starts)))))
+                    offsets)))))
+
+(defun org-linear--run-removals (index)
+  "Remove the headings recorded in `org-linear--removals', deepest last first.
+A heading goes after the sub-issues under it that leave too, and stays
+if any issue is still under it: one the sync could not move out, or one
+that stays for its unsent edits.  INDEX locates headings."
+  (let ((removals (seq-filter (lambda (removal) (gethash (car removal) (plist-get index :tasks)))
+                              org-linear--removals)))
+    (dolist (removal (sort removals (lambda (a b)
+                                      (> (gethash (car a) (plist-get index :tasks))
+                                         (gethash (car b) (plist-get index :tasks))))))
+      (let ((marker (gethash (car removal) (plist-get index :tasks))))
+        (if (org-linear--descendant-issues marker)
+            (org-linear--log "Kept \"%s\": issues are still under it"
+                             (org-with-point-at marker (org-get-heading t t t t)))
+          (funcall (cdr removal)))))))
+
+(defun org-linear--apply-milestones (data converted index projects)
+  "Apply DATA's milestones to the current buffer and return the edits to send.
+A milestone without a heading gets one under its project's heading.
+CONVERTED maps conversion keys to Org text; INDEX locates headings;
+PROJECTS are the teams' projects."
+  (let (ops)
+    (dolist (milestone (alist-get 'milestones data))
+      (let* ((id (plist-get milestone :id))
+             (marker (gethash id (plist-get index :milestones))))
+        (cond
+         ((gethash id (plist-get index :milestone-duplicates))
+          (org-linear--log "Not synced: the milestone \"%s\" has more than one heading; delete the copies"
+                           (plist-get milestone :title)))
+         (marker (setq ops (nconc ops (org-linear--merge-milestone milestone converted marker))))
+         (t (org-linear--insert-milestone milestone converted index projects)))))
+    ops))
+
+(defun org-linear--milestone-view (marker)
+  "Return the milestone heading at MARKER as Org field values."
+  (org-with-point-at marker
+    (list :title (substring-no-properties (org-get-heading t t t t))
+          :deadline (org-linear--planning-date "DEADLINE")
+          :body (org-linear--body))))
+
+(defun org-linear--merge-milestone (milestone converted marker)
+  "Merge MILESTONE with its heading at MARKER; return the edits to send.
+Its name, target date and description merge three-way as an issue's
+fields do.  CONVERTED maps conversion keys to Org text."
+  (let* ((id (plist-get milestone :id))
+         (stored (gethash id (org-linear--state-objects)))
+         (local (org-linear--milestone-view marker))
+         (remote (org-linear-in-place--object-remote-view milestone converted stored nil))
+         (base (or stored (append (copy-sequence local) (list :kind 'milestone))))
+         (new-base (copy-sequence base))
+         (named `((identifier . ,(format "milestone \"%s\"" (plist-get local :title)))))
+         pushed)
+    (dolist (field '(:title :deadline :body))
+      (let ((l (plist-get local field))
+            (r (plist-get remote field))
+            (b (plist-get base field)))
+        (cond
+         ((equal l r) (setq new-base (plist-put new-base field r)))
+         ((equal l b)
+          (org-linear--set-milestone-field marker field r)
+          (org-linear--count :pulled)
+          (setq new-base (plist-put new-base field r)))
+         ((equal r b) (push (cons field l) pushed))
+         ((eq org-linear-conflict-winner 'org)
+          (org-linear--conflict named field r l)
+          (push (cons field l) pushed))
+         (t
+          (org-linear--set-milestone-field marker field r)
+          (org-linear--conflict named field l r)
+          (setq new-base (plist-put new-base field r))))))
+    (setq new-base (plist-put new-base :desc-md (plist-get milestone :md)))
+    (puthash id (plist-put new-base :edited (plist-get milestone :edited))
+             (org-linear--state-objects))
+    (when pushed
+      (let ((op (list :type 'object-update :kind 'milestone :id id
+                      :fields (nreverse pushed) :title (plist-get local :title))))
+        (if (member (org-linear--op-signature op) (plist-get new-base :rejected))
+            (progn (org-linear--log "Not sent again: Linear refused this edit of the milestone \"%s\""
+                                    (plist-get local :title))
+                   nil)
+          (list op))))))
+
+(defun org-linear--set-milestone-field (marker field value)
+  "Set FIELD of the milestone heading at MARKER to VALUE."
+  (org-with-point-at marker
+    (pcase field
+      (:title (org-edit-headline value))
+      (:deadline (org-linear--set-planning 'deadline value))
+      (:body (org-linear--set-body value)))))
+
+(defun org-linear--insert-milestone (milestone converted index projects)
+  "Insert a heading for MILESTONE at the end of its project's heading.
+CONVERTED maps conversion keys to Org text; INDEX locates headings;
+PROJECTS are the teams' projects."
+  (let* ((id (plist-get milestone :id))
+         (stored (gethash id (org-linear--state-objects)))
+         (view (list :title (plist-get milestone :title)
+                     :deadline (plist-get milestone :deadline)
+                     :body (or (gethash (cons 'desc id) converted) (plist-get stored :body) "")))
+         (project (org-linear--project-heading (plist-get milestone :project) projects index))
+         (pos (org-with-point-at project
+                (org-end-of-subtree t t)
+                (unless (bolp) (insert "\n"))
+                (point))))
+    (goto-char pos)
+    (insert "** " (car org-linear-milestone-keywords) " " (plist-get view :title) "\n"
+            (if (plist-get view :deadline)
+                (format "DEADLINE: %s\n" (org-linear--stamp (plist-get view :deadline)))
+              "")
+            ":PROPERTIES:\n:LINEAR_MILESTONE: " id "\n:END:\n"
+            (if (string-blank-p (plist-get view :body)) "" (concat (plist-get view :body) "\n")))
+    (puthash id (org-linear--marker pos) (plist-get index :milestones))
+    (puthash id (append view (list :kind 'milestone :desc-md (plist-get milestone :md)
+                                   :edited (plist-get milestone :edited)))
+             (org-linear--state-objects))
+    (org-linear--count :pulled)))
+
+(defun org-linear--remove-vanished-milestones (data index)
+  "Remove the headings of milestones that INDEX has and DATA no longer does.
+They were deleted in Linear.  A heading that holds anything not in
+Linear, edits or subheadings, stays as a plain heading, without its
+keyword and ID, so that it is not created again."
+  (let ((fetched (make-hash-table :test #'equal)))
+    (dolist (milestone (alist-get 'milestones data))
+      (puthash (plist-get milestone :id) t fetched))
+    (maphash
+     (lambda (id marker)
+       (unless (gethash id fetched)
+         (let ((base (gethash id (org-linear--state-objects)))
+               (local (org-linear--milestone-view marker)))
+           (if (and base
+                    (cl-every (lambda (field) (equal (plist-get local field) (plist-get base field)))
+                              '(:title :deadline :body))
+                    (not (org-linear--has-children-p marker)))
+               (org-with-point-at marker
+                 (delete-region (point) (progn (org-end-of-subtree t t) (point))))
+             (org-with-point-at marker
+               (org-linear--set-todo 'none nil)
+               (org-entry-delete nil "LINEAR_MILESTONE"))
+             (org-linear--log "Kept \"%s\" as a plain heading: its milestone was deleted in Linear, which cannot take its edits or subheadings"
+                              (plist-get local :title)))
+           (remhash id (org-linear--state-objects)))))
+     (plist-get index :milestones))))
+
+(defun org-linear--milestone-creation-ops (index)
+  "Return edits that create a Linear milestone for each new milestone heading.
+INDEX lists them; each needs a project heading with a project above it."
+  (let (ops)
+    (dolist (marker (plist-get index :new-milestones))
+      (let* ((project (org-with-point-at marker
+                        (save-excursion (org-up-heading-safe) (org-linear--heading-project-id))))
+             (view (org-linear--milestone-view marker))
+             (op (list :type 'milestone-add :marker marker :view view :project project
+                       :pending (org-entry-get marker "LINEAR_PENDING_MILESTONE"))))
+        (cond
+         ((null project)
+          (org-linear--log "Not created: the milestone \"%s\" needs a project heading with a project"
+                           (plist-get view :title)))
+         ((member (org-linear--op-signature op) (plist-get org-linear--state :rejected-adds))
+          (org-linear--log "Not created again: Linear refused the milestone \"%s\"; change it to retry"
+                           (plist-get view :title)))
+         (t (push op ops)))))
+    (nreverse ops)))
+
+(defun org-linear--run-milestone-add (op next)
+  "Create the Linear milestone of OP, link its heading, then call NEXT.
+As with an issue, its ID is chosen here and kept on the heading, as
+LINEAR_PENDING_MILESTONE, until Linear confirms it, so that a creation
+whose answer was lost is found instead of repeated."
+  (if-let* ((pending (plist-get op :pending)))
+      (org-linear-in-place--fetch-object-chunks
+       (list (list pending)) nil
+       (lambda (objects)
+         (if-let* ((found (seq-find (lambda (object) (eq (plist-get object :kind) 'milestone))
+                                    objects)))
+             (progn (org-linear--link-milestone op found pending) (funcall next))
+           (org-linear--create-milestone op pending next))))
+    (let ((id (org-id-uuid))
+          (marker (plist-get op :marker)))
+      (org-linear--edit-and-maybe-save
+       (marker-buffer marker)
+       (lambda () (org-entry-put marker "LINEAR_PENDING_MILESTONE" id)))
+      (org-linear--create-milestone op id next))))
+
+(defun org-linear--create-milestone (op id next)
+  "Create the milestone of OP with ID in Linear, then call NEXT."
+  (let ((create (list :kind 'milestone :pending id :view (plist-get op :view)
+                      :relations (list :project (plist-get op :project)))))
+    (org-linear--org-to-md
+     (plist-get (plist-get op :view) :body)
+     (lambda (md)
+       (org-linear--graphql
+        (org-linear-in-place--mutation 'milestone 'create)
+        `((input . ,(org-linear-in-place--create-input create md)))
+        (lambda (data)
+          (org-linear--link-milestone
+           op (org-linear-in-place--object
+               'milestone (org-linear-in-place--payload 'milestone :create data))
+           id)
+          (funcall next))
+        (org-linear--rejected-handler op next))))))
+
+(defun org-linear--link-milestone (op object pending)
+  "Record OBJECT, the milestone created for OP, and link its heading.
+The heading is found by PENDING, the ID it was created with.  The sync
+runs again, to send the milestone of the issues moved under the heading."
+  (let ((id (plist-get object :id))
+        (buffer (marker-buffer (plist-get op :marker))))
+    (puthash id (append (copy-sequence (plist-get op :view))
+                        (list :kind 'milestone :desc-md (plist-get object :md)
+                              :edited (plist-get object :edited)))
+             (org-linear--state-objects))
+    (org-linear--edit-and-maybe-save
+     buffer
+     (lambda ()
+       (if-let* ((pos (org-find-property "LINEAR_PENDING_MILESTONE" pending)))
+           (progn
+             (org-entry-put pos "LINEAR_MILESTONE" id)
+             (org-entry-delete pos "LINEAR_PENDING_MILESTONE"))
+         (org-linear--log "Created the milestone \"%s\", but its heading is gone; the next sync adds it again"
+                          (plist-get object :title)))))
+    (org-linear--save-state)
+    (org-linear--count :created)
+    (setq org-linear--rerun t)))
+
+(defun org-linear--added-relations (op)
+  "Return the relations a new issue of OP is created with, a plist.
+They are those its heading's place shows now, :milestone and :parent,
+when those headings are in Linear; in the mirror layout with a
+hierarchy only."
+  (when-let* ((marker (and (org-linear--mirror-hierarchy-p) (plist-get op :marker)))
+              (buffer (and (markerp marker) (marker-buffer marker))))
+    (with-current-buffer buffer
+      (org-with-wide-buffer
+       (when-let* ((heading (org-linear--created-heading
+                             marker (plist-get (plist-get op :view) :title))))
+         (let ((relations (org-with-point-at heading (org-linear--tree-relations))))
+           (list :milestone (and (stringp (plist-get relations :milestone))
+                                 (plist-get relations :milestone))
+                 :parent (and (stringp (plist-get relations :parent))
+                              (plist-get relations :parent)))))))))
 
 (defun org-linear--marker (&optional pos)
   "Return a marker at POS, or the current heading, that text inserted there pushes.
