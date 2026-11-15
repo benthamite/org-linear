@@ -3189,5 +3189,53 @@ DEADLINE: <2026-12-01 Tue>
     (should (org-linear-test--named org-linear-test--projects "Site"))
     (should (hash-table-p (plist-get org-linear--state :objects)))))
 
+;; The scan finds visiting buffers through a table built once.
+
+(ert-deftest org-linear-test-in-place-buffer-visiting-matches-find-buffer-visiting ()
+  "The scan's table finds the buffer `find-buffer-visiting' finds."
+  (let* ((dir (file-name-as-directory (make-temp-file "org-linear-visiting" t)))
+         (a (expand-file-name "a.org" dir))
+         (b (expand-file-name "b.org" dir))
+         (c (expand-file-name "c.org" dir))
+         (link (expand-file-name "link.org" dir))
+         buffers)
+    (unwind-protect
+        (progn
+          (dolist (f (list a b c)) (write-region "* TODO x\n" nil f nil 'silent))
+          (make-symbolic-link b link)
+          (push (find-file-noselect a) buffers)
+          (push (find-file-noselect b) buffers)
+          (let ((org-linear-in-place--visiting (org-linear-in-place--visiting-table)))
+            (dolist (f (list a b c link))
+              (should (eq (org-linear-in-place--buffer-visiting f)
+                          (find-buffer-visiting f))))
+            (should (org-linear-in-place--buffer-visiting link))
+            (should-not (org-linear-in-place--buffer-visiting c))
+            ;; A buffer killed after the table was built falls back.
+            (kill-buffer (car buffers))
+            (should (eq (org-linear-in-place--buffer-visiting b)
+                        (find-buffer-visiting b)))))
+      (dolist (buffer buffers)
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer)))
+      (delete-directory dir t))))
+
+(ert-deftest org-linear-test-in-place-scan-does-not-search-buffers-per-file ()
+  "A scan builds the visiting table once instead of searching per file."
+  (let ((calls 0))
+    (cl-letf (((symbol-function 'org-linear-in-place--files)
+               (lambda () (list "/nonexistent/a.org" "/nonexistent/b.org")))
+              ((symbol-function 'org-linear-in-place--scan-file)
+               (lambda (file _scan _cache)
+                 (should (hash-table-p org-linear-in-place--visiting))
+                 (org-linear-in-place--buffer-visiting file)))
+              ((symbol-function 'find-buffer-visiting)
+               (lambda (&rest _) (cl-incf calls) nil))
+              ((symbol-function 'org-linear-in-place--cache)
+               (lambda () (make-hash-table :test #'equal))))
+      (org-linear-in-place--scan)
+      (should (= calls 0)))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

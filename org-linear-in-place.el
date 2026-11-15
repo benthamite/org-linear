@@ -93,6 +93,43 @@ hierarchy; see `org-linear-in-place--hierarchy-p'."
                     (butlast keywords))))
               (default-value 'org-todo-keywords)))
 
+;; `find-buffer-visiting' walks the whole buffer list on every call, so a
+;; scan that called it once per file cost files x buffers: 14 s for 5,248
+;; files and 915 buffers, every sync, with Emacs blocked.
+(defvar org-linear-in-place--visiting nil
+  "During a scan, the table `org-linear-in-place--visiting-table' built.")
+
+(defun org-linear-in-place--visiting-table ()
+  "Return a table from the names of visited files to their buffers.
+Keys are (name . FILE-NAME), (truename . TRUENAME) and (number . FILE-NUMBER),
+the three ways `find-buffer-visiting' matches a buffer; the first buffer
+in `buffer-list' wins, as there."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (buffer (buffer-list) table)
+      (when-let* ((name (buffer-local-value 'buffer-file-name buffer)))
+        (dolist (key (list (cons 'name name)
+                           (cons 'truename (buffer-local-value 'buffer-file-truename buffer))
+                           (cons 'number (buffer-local-value 'buffer-file-number buffer))))
+          (when (and (cdr key) (not (gethash key table)))
+            (puthash key buffer table)))))))
+
+(defun org-linear-in-place--buffer-visiting (file)
+  "Return the buffer visiting FILE, as `find-buffer-visiting' does.
+During a scan, look FILE up in `org-linear-in-place--visiting'; a buffer
+killed since the table was built falls back to `find-buffer-visiting'."
+  (let* ((table org-linear-in-place--visiting)
+         (buffer
+          (and table
+               (let ((file (expand-file-name file)))
+                 (or (gethash (cons 'name file) table)
+                     (gethash (cons 'truename (abbreviate-file-name (file-truename file)))
+                              table)
+                     (and find-file-existing-other-name
+                          (gethash (cons 'number (nthcdr 10 (file-attributes file))) table)))))))
+    (if (or (null table) (and buffer (not (buffer-live-p buffer))))
+        (find-buffer-visiting file)
+      buffer)))
+
 (defun org-linear-in-place--scan ()
   "Read the files and return the sync's view of them, a plist.
 :present maps every issue ID found in any file to its file; :tasks maps
@@ -121,7 +158,8 @@ NODE), and :object-pending does the same for those being created."
                     :skipped (make-hash-table :test #'equal)
                     :indexed (make-hash-table :test #'equal)))
         (cache (org-linear-in-place--cache))
-        (seen (make-hash-table :test #'equal)))
+        (seen (make-hash-table :test #'equal))
+        (org-linear-in-place--visiting (org-linear-in-place--visiting-table)))
     (dolist (file (org-linear-in-place--files))
       (puthash file t seen)
       (org-linear-in-place--scan-file file scan cache))
@@ -172,7 +210,7 @@ It also changes with `org-linear-in-place--cache-version'."
 
 (defun org-linear-in-place--scan-file (file scan cache)
   "Add FILE to SCAN, reading it again unless CACHE shows it unchanged."
-  (let* ((buffer (find-buffer-visiting file))
+  (let* ((buffer (org-linear-in-place--buffer-visiting file))
          (mtime (file-attribute-modification-time (file-attributes file)))
          (entry (gethash file cache))
          (dirty (and buffer (buffer-modified-p buffer)))
