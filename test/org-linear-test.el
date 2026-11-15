@@ -490,10 +490,16 @@ A string is an error message; nil means NAME is no object operation."
 (defvar org-linear-test--dir nil
   "Temporary directory of the running test.")
 
+(defvar org-linear-test--timers nil
+  "The timers that existed when the running test began.")
+
 (defmacro org-linear-test--with-board (&rest body)
-  "Run BODY with a fresh fake board, mirrored file and sync state."
+  "Run BODY with a fresh fake board, mirrored file and sync state.
+Timers BODY leaves behind, such as a sync scheduled to run again, are
+cancelled, so that they cannot start a sync in a later test."
   (declare (indent 0))
-  `(let* ((org-linear-test--dir (make-temp-file "org-linear-test" t))
+  `(let* ((org-linear-test--timers (append timer-list timer-idle-list))
+          (org-linear-test--dir (make-temp-file "org-linear-test" t))
           (org-linear-file (expand-file-name "linear.org" org-linear-test--dir))
           (org-linear-state-file (expand-file-name "state.eld" org-linear-test--dir))
           (org-linear-teams '("ENG"))
@@ -518,6 +524,9 @@ A string is an error message; nil means NAME is no object operation."
              (kill-buffer buffer)))
          (when (get-buffer org-linear--log-buffer)
            (kill-buffer org-linear--log-buffer))
+         (dolist (timer (append timer-list timer-idle-list))
+           (unless (memq timer org-linear-test--timers)
+             (cancel-timer timer)))
          (delete-directory org-linear-test--dir t)))))
 
 (defun org-linear-test--sync ()
