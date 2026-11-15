@@ -34,6 +34,12 @@
 ;; created in Linear go to `org-linear-inbox-file'.  The sync never deletes
 ;; heading text, never edits a buffer with unsaved changes, and leaves out
 ;; excluded headings even when they are linked.
+;;
+;; With `org-linear-project-keywords' or `org-linear-milestone-keywords'
+;; set, the nesting of headings syncs too: a task under a task is a
+;; sub-issue, project headings become Linear projects or initiatives, and
+;; milestone headings project milestones.  The hierarchy lives in Org, so
+;; moving a heading sends its new relations.
 
 ;;; Code:
 
@@ -46,24 +52,36 @@
   "Regexp matching the names of the files the scan reads.")
 
 (defvar org-linear-in-place--candidate-cache nil
-  "The value of `org-todo-keywords' and the candidate regexp built from it.")
+  "The keywords and hierarchy the candidate regexp was built for, and the regexp.
+The car is (KEYWORDS . HIERARCHY): the value of `org-todo-keywords' and
+that of `org-linear-in-place--hierarchy-p'.")
 
 (defun org-linear-in-place--candidate-regexp ()
   "Return a regexp that a file holding a heading the scan must index matches.
 That is an open TODO heading, by the keywords of `org-todo-keywords', a
 linked heading, or a line that sets the file's own keywords.  Excluded
 keywords and headings are left out later, when the file is indexed."
-  (let ((keywords (default-value 'org-todo-keywords)))
-    (unless (eq (car org-linear-in-place--candidate-cache) keywords)
+  (let ((keywords (default-value 'org-todo-keywords))
+        (hierarchy (org-linear-in-place--hierarchy-p))
+        (key (car org-linear-in-place--candidate-cache)))
+    (unless (and (consp key) (eq (car key) keywords) (eq (cdr key) hierarchy))
       (setq org-linear-in-place--candidate-cache
-            (cons keywords (org-linear-in-place--build-candidate-regexp))))
+            (cons (cons keywords hierarchy) (org-linear-in-place--build-candidate-regexp))))
     (cdr org-linear-in-place--candidate-cache)))
 
 (defun org-linear-in-place--build-candidate-regexp ()
   "Build the regexp of `org-linear-in-place--candidate-regexp'."
   (concat "^\\*+ +" (regexp-opt (org-linear-in-place--open-keywords) t) "\\(?: \\|$\\)"
-          "\\|^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:"
+          "\\|" (org-linear-in-place--id-property-regexp)
           "\\|^#\\+\\(?:SEQ_\\|TYP_\\)?TODO:"))
+
+(defun org-linear-in-place--id-property-regexp ()
+  "Return a regexp matching the start of a property line with an ID the sync wrote.
+The IDs of projects, initiatives and milestones count only with a
+hierarchy; see `org-linear-in-place--hierarchy-p'."
+  (if (org-linear-in-place--hierarchy-p)
+      "^[ \t]*:LINEAR_\\(?:PENDING_\\)?\\(?:UUID\\|PROJECT\\|INITIATIVE\\|MILESTONE\\):"
+    "^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:"))
 
 (defun org-linear-in-place--open-keywords ()
   "Return the open TODO keywords of the default value of `org-todo-keywords'."
@@ -84,12 +102,20 @@ creation was sent with; :duplicates holds IDs with several headings;
 :buffers lists the buffers the sync may edit and :opened those it
 visited itself; :unfinished lists the files holding headings whose
 creation this sync sends or defers, by name, since the sync may close a
-file and visit it again; :skipped maps files to why they are left out."
+file and visit it again; :skipped maps files to why they are left out.
+With a hierarchy, :nodes lists the nodes of task, project and milestone
+headings, :node-of maps the markers of tasks to their nodes, :objects
+maps the IDs of linked projects, initiatives and milestones to (KIND .
+NODE), and :object-pending does the same for those being created."
   (let ((scan (list :present (make-hash-table :test #'equal)
                     :tasks (make-hash-table :test #'equal)
                     :new nil
                     :pending (make-hash-table :test #'equal)
                     :duplicates (make-hash-table :test #'equal)
+                    :nodes nil
+                    :node-of (make-hash-table :test #'eq)
+                    :objects (make-hash-table :test #'equal)
+                    :object-pending (make-hash-table :test #'equal)
                     :buffers nil :opened nil :linked nil :unfinished nil
                     :skipped (make-hash-table :test #'equal)
                     :indexed (make-hash-table :test #'equal)))
@@ -131,9 +157,12 @@ dropped when the options that decide the scope change."
 (defun org-linear-in-place--scope-key ()
   "Return a value that changes when an option deciding the scope changes.
 It also changes with `org-linear-in-place--cache-version'."
-  (sxhash-equal (list org-linear-in-place--cache-version
-                      org-linear-directories org-linear-exclude-files
-                      org-linear-exclude-tags org-linear-exclude-keywords)))
+  (sxhash-equal (append (list org-linear-in-place--cache-version
+                              org-linear-directories org-linear-exclude-files
+                              org-linear-exclude-tags org-linear-exclude-keywords)
+                        (when (org-linear-in-place--hierarchy-p)
+                          (list org-linear-project-keywords
+                                org-linear-milestone-keywords)))))
 
 (defun org-linear-in-place--excluded-file-p (file)
   "Return non-nil if FILE is out of scope: excluded or an archive."
@@ -174,7 +203,9 @@ creations in flight, so that their issues count as present."
                         (let ((case-fold-search nil))
                           (re-search-forward (org-linear-in-place--candidate-regexp) nil t))))
           uuids)
-      (while (re-search-forward "^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:[ \t]+\\(\\S-+\\)" nil t)
+      (while (re-search-forward (concat (org-linear-in-place--id-property-regexp)
+                                        "[ \t]+\\(\\S-+\\)")
+                                nil t)
         (push (match-string-no-properties 1) uuids))
       (list :mtime mtime :uuids (nreverse uuids) :candidates (and candidates t)
             :new (and candidates (org-linear-in-place--unlinked-heading-p))))))
@@ -182,25 +213,39 @@ creations in flight, so that their issues count as present."
 (defun org-linear-in-place--unlinked-heading-p ()
   "Return non-nil if the current buffer's text may hold a heading to create.
 That is an open TODO heading, by keyword and not excluded by it, whose
-entry has no Linear ID, or a line setting the file's own keywords.  Tags
-and habits are not checked, so this can say yes for a heading the scan
-then leaves out; it never says no for one the scan would create."
+entry has no Linear ID, or a line setting the file's own keywords.  With
+a hierarchy, a project or milestone heading counts when its entry has no
+ID of a project, initiative or milestone.  Tags and habits are not
+checked, so this can say yes for a heading the scan then leaves out; it
+never says no for one the scan would create, except for a project
+heading that needs a second object, which the scan finds when its file
+changes and `org-linear-in-place--refresh-cache' remembers."
   (let ((case-fold-search nil)
-        (heading (concat "^\\*+ +"
-                         (regexp-opt (seq-difference (org-linear-in-place--open-keywords)
-                                                     org-linear-exclude-keywords))
-                         "\\(?: \\|$\\)"))
+        (objects (and (org-linear-in-place--hierarchy-p)
+                      (append org-linear-project-keywords org-linear-milestone-keywords))))
+    (goto-char (point-min))
+    (or (and (re-search-forward "^#\\+\\(?:SEQ_\\|TYP_\\)?TODO:" nil t) t)
+        (org-linear-in-place--unlinked-p
+         (seq-difference (org-linear-in-place--open-keywords)
+                         (append org-linear-exclude-keywords objects))
+         "^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:")
+        (and objects
+             (org-linear-in-place--unlinked-p
+              (seq-difference objects org-linear-exclude-keywords)
+              "^[ \t]*:LINEAR_\\(?:PENDING_\\)?\\(?:PROJECT\\|INITIATIVE\\|MILESTONE\\):")))))
+
+(defun org-linear-in-place--unlinked-p (keywords id)
+  "Return non-nil if a heading with one of KEYWORDS lacks a line matching ID.
+The line must be in the heading's entry, before the next heading."
+  (let ((heading (concat "^\\*+ +" (regexp-opt keywords) "\\(?: \\|$\\)"))
         found)
     (goto-char (point-min))
-    (if (re-search-forward "^#\\+\\(?:SEQ_\\|TYP_\\)?TODO:" nil t)
-        t
-      (while (and (not found) (re-search-forward heading nil t))
-        (let ((end (save-excursion
-                     (if (re-search-forward "^\\*+ " nil t) (match-beginning 0) (point-max)))))
-          (unless (save-excursion
-                    (re-search-forward "^[ \t]*:LINEAR_\\(?:PENDING_\\)?UUID:" end t))
-            (setq found t))))
-      found)))
+    (while (and (not found) (re-search-forward heading nil t))
+      (let ((end (save-excursion
+                   (if (re-search-forward "^\\*+ " nil t) (match-beginning 0) (point-max)))))
+        (unless (save-excursion (re-search-forward id end t))
+          (setq found t))))
+    found))
 
 (defun org-linear-in-place--index-file (file scan)
   "Visit FILE and add its headings to SCAN, unless it cannot be edited now.
@@ -238,33 +283,62 @@ reverted first.  A buffer the sync visits itself is recorded in SCAN."
       buffer))))
 
 (defun org-linear-in-place--index-buffer (scan)
-  "Add the headings of the current buffer to SCAN, and record its counts."
-  (let ((new 0)
-        uuids)
+  "Add the headings of the current buffer to SCAN, and record its counts.
+With a hierarchy, each task, project and milestone heading also gets a
+node; see `org-linear-in-place--node'."
+  (let ((hierarchy (org-linear-in-place--hierarchy-p))
+        (new 0)
+        uuids stack nodes)
     (goto-char (point-min))
     (while (re-search-forward org-outline-regexp-bol nil t)
-      (let ((uuid (org-entry-get nil "LINEAR_UUID"))
-            (pending (org-entry-get nil "LINEAR_PENDING_UUID"))
-            (keyword (org-get-todo-state)))
+      (let* ((uuid (org-entry-get nil "LINEAR_UUID"))
+             (pending (org-entry-get nil "LINEAR_PENDING_UUID"))
+             (keyword (org-get-todo-state))
+             (objects (and hierarchy (org-linear-in-place--heading-objects)))
+             (kind (org-linear-in-place--heading-kind keyword uuid objects)))
         (when uuid (push uuid uuids))
         (when pending (push pending uuids))
-        (when (and (or uuid keyword) (not (org-linear-in-place--excluded-heading-p keyword)))
-          (cond
-           ((and uuid (gethash uuid (plist-get scan :tasks)))
-            (puthash uuid t (plist-get scan :duplicates)))
-           (uuid (puthash uuid (org-linear--marker) (plist-get scan :tasks)))
-           ((member keyword org-not-done-keywords)
-            (cl-incf new)
-            (when pending
-              (puthash pending t (plist-get scan :pending)))
-            (plist-put scan :new (append (plist-get scan :new) (list (org-linear--marker)))))))
+        (dolist (object objects) (push (nth 1 object) uuids))
+        (when hierarchy
+          (setq stack (org-linear-in-place--pop-stack stack)))
+        (when (and kind (not (org-linear-in-place--excluded-heading-p keyword)))
+          (let ((node (and hierarchy (org-linear-in-place--node kind keyword stack scan))))
+            (when node
+              (push node stack)
+              (push node nodes))
+            (if (eq kind 'task)
+                (when (org-linear-in-place--index-task uuid pending keyword node scan)
+                  (cl-incf new))
+              (org-linear-in-place--index-object node objects scan))))
         (end-of-line)))
+    (when hierarchy
+      (setq nodes (nreverse nodes))
+      (plist-put scan :nodes (append (plist-get scan :nodes) nodes))
+      (cl-incf new (seq-count #'org-linear-in-place--missing-objects nodes)))
     (dolist (uuid uuids)
       (puthash uuid buffer-file-name (plist-get scan :present)))
     (let ((entry (gethash buffer-file-name (org-linear-in-place--cache))))
       (when entry
         (puthash buffer-file-name (plist-put (plist-put entry :new (> new 0)) :uuids uuids)
                  (org-linear-in-place--cache))))))
+
+(defun org-linear-in-place--index-task (uuid pending keyword node scan)
+  "Add the task heading at point to SCAN; return non-nil if it has no issue.
+UUID is its issue's ID, PENDING the ID its creation was sent with, and
+KEYWORD its TODO keyword.  NODE is its node, or nil without a hierarchy."
+  (let ((marker (lambda () (if node (plist-get node :marker) (org-linear--marker)))))
+    (cond
+     ((and uuid (gethash uuid (plist-get scan :tasks)))
+      (puthash uuid t (plist-get scan :duplicates))
+      nil)
+     (uuid
+      (puthash uuid (funcall marker) (plist-get scan :tasks))
+      nil)
+     ((member keyword org-not-done-keywords)
+      (when pending
+        (puthash pending t (plist-get scan :pending)))
+      (plist-put scan :new (append (plist-get scan :new) (list (funcall marker))))
+      t))))
 
 (defun org-linear-in-place--excluded-heading-p (keyword)
   "Return non-nil if the heading at point, whose keyword is KEYWORD, is excluded."
@@ -284,10 +358,13 @@ reverted first.  A buffer the sync visits itself is recorded in SCAN."
              (plist-get org-linear--scan :skipped))
     (org-linear-in-place--fetch
      (lambda (data)
-       (org-linear-in-place--locate data)
-       (org-linear-in-place--ensure-labels
-        (lambda ()
-          (org-linear-in-place--on-fetch data started)))))))
+       (org-linear-in-place--fetch-objects
+        (lambda (objects)
+          (push (cons 'objects objects) data)
+          (org-linear-in-place--locate data)
+          (org-linear-in-place--ensure-labels
+           (lambda ()
+             (org-linear-in-place--on-fetch data started)))))))))
 
 (defun org-linear-in-place--fetch (callback)
   "Fetch the metadata and the issues the sync needs, then CALLBACK with them.
@@ -371,7 +448,8 @@ Then call CALLBACK."
   "Convert the texts of DATA that changed, then merge it.
 STARTED is when the sync began, the next sync's starting point."
   (org-linear--md-to-org
-   (org-linear--conversion-items data (plist-get org-linear--scan :present))
+   (append (org-linear--conversion-items data (plist-get org-linear--scan :present))
+           (org-linear-in-place--object-conversion-items data))
    (lambda (converted)
      (org-linear-in-place--merge-bodies
       (org-linear-in-place--body-pulls data converted)
@@ -380,21 +458,37 @@ STARTED is when the sync began, the next sync's starting point."
 
 (defun org-linear-in-place--locate (data)
   "Index the files of the issues in DATA whose files the scan did not visit.
-The inbox file is indexed too, in case new issues go there."
+The inbox file is indexed too, in case new issues go there, and so are
+the files of the projects, initiatives and milestones that changed or
+went in Linear."
   (when org-linear-inbox-file
     (let ((inbox (expand-file-name org-linear-inbox-file)))
       (unless (gethash inbox (plist-get org-linear--scan :skipped))
         (org-linear-in-place--index-file inbox org-linear--scan))))
   (dolist (task (alist-get 'tasks data))
-    (let* ((id (alist-get 'id task))
-           (file (gethash id (plist-get org-linear--scan :present))))
-      (when (and file
-                 (not (gethash id (plist-get org-linear--scan :tasks)))
-                 (not (org-linear-in-place--excluded-file-p file))
-                 (not (gethash file (plist-get org-linear--scan :skipped)))
-                 (not (gethash file (plist-get org-linear--scan :indexed))))
-        (puthash file t (plist-get org-linear--scan :indexed))
-        (org-linear-in-place--index-file file org-linear--scan)))))
+    (org-linear-in-place--locate-id (alist-get 'id task)))
+  (when (org-linear-in-place--hierarchy-p)
+    (let ((objects (org-linear-in-place--objects-by-id (alist-get 'objects data))))
+      (maphash (lambda (id base)
+                 (let ((object (gethash id objects)))
+                   (when (or (null object)
+                             (plist-get object :trashed)
+                             (not (equal (plist-get object :edited) (plist-get base :edited))))
+                     (org-linear-in-place--locate-id id))))
+               (org-linear--state-objects)))))
+
+(defun org-linear-in-place--locate-id (id)
+  "Index the file that holds the ID of an issue or object, if the scan did not.
+A file the scan leaves out stays out."
+  (let ((file (gethash id (plist-get org-linear--scan :present))))
+    (when (and file
+               (not (gethash id (plist-get org-linear--scan :tasks)))
+               (not (gethash id (plist-get org-linear--scan :objects)))
+               (not (org-linear-in-place--excluded-file-p file))
+               (not (gethash file (plist-get org-linear--scan :skipped)))
+               (not (gethash file (plist-get org-linear--scan :indexed))))
+      (puthash file t (plist-get org-linear--scan :indexed))
+      (org-linear-in-place--index-file file org-linear--scan))))
 
 (defun org-linear-in-place--body-pulls (data converted)
   "Return the description edits in DATA that would replace an unedited Org body.
@@ -410,7 +504,7 @@ Each is (ID MARKER BASE MD); CONVERTED holds the converted descriptions."
                    (not (equal (alist-get 'description task) (plist-get base :desc-md)))
                    (equal (org-linear-in-place--body-at marker) (plist-get base :body)))
           (push (list id marker base md) pulls))))
-    (nreverse pulls)))
+    (append (nreverse pulls) (org-linear-in-place--object-body-pulls data converted))))
 
 (defun org-linear-in-place--body-at (marker)
   "Return the body of the heading at MARKER."
@@ -459,7 +553,8 @@ or if the merge fails, the body is held back and MD is recorded, so that
 it is not sent to the model again."
   (let ((hold (lambda (reason)
                 (org-linear--log "Held back %s's description edit from Linear: %s" id reason)
-                (puthash id (plist-put (copy-sequence base) :held-md md) (org-linear--state-tasks))
+                (puthash id (plist-put (copy-sequence base) :held-md md)
+                         (or (org-linear--table-of id) (org-linear--state-tasks)))
                 (puthash id :hold org-linear--body-overrides)
                 (funcall next))))
     (if (not org-linear-merge-body-function)
@@ -523,6 +618,7 @@ nor archived; they sync once the buffer is saved."
                (plist-get scan :tasks))
       (plist-put scan :new (seq-remove (lambda (marker) (eq (marker-buffer marker) buffer))
                                        (plist-get scan :new)))
+      (org-linear-in-place--drop-nodes buffer)
       (plist-put scan :opened (remq buffer (plist-get scan :opened))))
     (plist-put scan :buffers (seq-difference (plist-get scan :buffers) changed))))
 
@@ -554,6 +650,13 @@ change from Linear would send its reversal."
 
 (defun org-linear-in-place--apply (data converted)
   "Apply DATA to the files and return the edits to send.
+CONVERTED maps conversion keys to Org text."
+  (if (org-linear-in-place--hierarchy-p)
+      (org-linear-in-place--apply-hierarchy data converted)
+    (org-linear-in-place--apply-flat data converted)))
+
+(defun org-linear-in-place--apply-flat (data converted)
+  "Apply DATA to the files and return the edits to send, without a hierarchy.
 CONVERTED maps conversion keys to Org text."
   (let* ((scan org-linear--scan)
          (comments (org-linear--comments-by-issue data converted))
@@ -602,12 +705,17 @@ again."
          (held (eq (gethash id org-linear--body-overrides) :hold)))
     (when held
       (puthash id (or (plist-get base :body) "") org-linear--body-overrides))
-    (prog1 (org-linear--merge task converted comments nil nil marker base)
+    (let ((ops (org-linear--merge task converted comments nil nil marker base))
+          (node (and (org-linear-in-place--hierarchy-p)
+                     (gethash marker (plist-get org-linear--scan :node-of)))))
       (when held (remhash id org-linear--body-overrides))
       (when (and held base)
         (let ((new-base (gethash id (org-linear--state-tasks))))
           (puthash id (plist-put new-base :desc-md (plist-get base :desc-md))
-                   (org-linear--state-tasks)))))))
+                   (org-linear--state-tasks))))
+      (if node
+          (append ops (org-linear-in-place--issue-relation-ops task node))
+        ops))))
 
 (defun org-linear-in-place--cancel-trashed (marker task)
   "Mark the heading at MARKER cancelled, as TASK was deleted in Linear.
@@ -641,20 +749,34 @@ property records the closing it acted on."
   "Return edits that archive the issues whose headings left Org.
 Those are issues synced before whose IDs no file holds now.  FETCHED holds
 the IDs this sync fetched; it does not change the answer, since a trashed
-issue has already left the state.  More than `org-linear-archive-limit'
-archive none."
-  (let (gone)
+issue has already left the state.  With a hierarchy, projects and
+initiatives are archived and milestones deleted on the same terms, after
+the issues.  More than `org-linear-archive-limit' of them in all archive
+none."
+  (let ((present (plist-get org-linear--scan :present))
+        gone objects)
     (ignore fetched)
-    (maphash (lambda (id _)
-               (unless (gethash id (plist-get org-linear--scan :present))
-                 (push id gone)))
+    (maphash (lambda (id _) (unless (gethash id present) (push id gone)))
              (org-linear--state-tasks))
-    (if (> (length gone) org-linear-archive-limit)
-        (progn
-          (org-linear--log "Not archived: the headings of %d issues are gone, more than `org-linear-archive-limit'; check `org-linear-directories'"
-                           (length gone))
-          nil)
-      (mapcar (lambda (id) (list :type 'archive :id id)) gone))))
+    (when (org-linear-in-place--hierarchy-p)
+      (maphash (lambda (id base)
+                 (unless (gethash id present) (push (cons id (plist-get base :kind)) objects)))
+               (org-linear--state-objects)))
+    (cond
+     ((> (+ (length gone) (length objects)) org-linear-archive-limit)
+      (if objects
+          (org-linear--log "Not archived: the headings of %d issues and %d projects, initiatives or milestones are gone, more than `org-linear-archive-limit'; check `org-linear-directories'"
+                           (length gone) (length objects))
+        (org-linear--log "Not archived: the headings of %d issues are gone, more than `org-linear-archive-limit'; check `org-linear-directories'"
+                         (length gone)))
+      nil)
+     (t
+      (append (mapcar (lambda (id) (list :type 'archive :id id)) gone)
+              (mapcar (lambda (object)
+                        (list :type 'object-archive :id (car object) :kind (cdr object)))
+                      (sort objects (lambda (a b)
+                                      (< (seq-position '(milestone project initiative) (cdr a))
+                                         (seq-position '(milestone project initiative) (cdr b)))))))))))
 
 (defun org-linear-in-place--run-archive (op next)
   "Archive the issue of OP in Linear, then call NEXT."
@@ -673,20 +795,23 @@ archive none."
 
 ;;;; Creating issues
 
-(defun org-linear-in-place--creation-ops (scan)
+(defun org-linear-in-place--creation-ops (scan &optional limit)
   "Return edits that create issues for the new headings in SCAN.
-At most `org-linear-create-limit' are created; the rest wait for the next
-scheduled sync, not an immediate rerun, so that a large import keeps to
-Linear's hourly request limit.  Each heading gets the ID of its issue
-as LINEAR_PENDING_UUID before anything is sent, and its file is saved,
-so that a lost answer is found again rather than repeated."
-  (let* ((new (plist-get scan :new))
-         (now (seq-take new org-linear-create-limit))
+At most LIMIT, by default `org-linear-create-limit', are created; the
+rest wait for the next scheduled sync, not an immediate rerun, so that a
+large import keeps to Linear's hourly request limit.  Each heading gets
+the ID of its issue as LINEAR_PENDING_UUID before anything is sent, and
+its file is saved, so that a lost answer is found again rather than
+repeated.  With a hierarchy, each issue is created with the relations
+its heading's place gives it."
+  (let* ((limit (or limit org-linear-create-limit))
+         (new (plist-get scan :new))
+         (now (seq-take new limit))
          ops)
-    (when (nthcdr org-linear-create-limit new)
+    (when (nthcdr limit new)
       (org-linear--log "Creating %d of %d new headings; the rest follow in the next syncs"
-                       org-linear-create-limit (length new)))
-    (dolist (marker (nthcdr org-linear-create-limit new))
+                       limit (length new)))
+    (dolist (marker (nthcdr limit new))
       (org-linear-in-place--mark-unfinished (marker-buffer marker)))
     (dolist (marker now)
       (let* ((view (org-linear--local-view marker))
@@ -694,10 +819,11 @@ so that a lost answer is found again rather than repeated."
                           (let ((id (org-id-uuid)))
                             (org-entry-put marker "LINEAR_PENDING_UUID" id)
                             id)))
+             (relations (org-linear-in-place--new-issue-relations marker))
              (op (list :type 'add
                        :marker (list :file (buffer-file-name (marker-buffer marker))
-                                     :pending pending)
-                       :view view :pending pending
+                                     :pending pending :relations relations)
+                       :view view :pending pending :relations relations
                        :team (alist-get 'id (car (plist-get org-linear--meta :teams))))))
         (if (member (org-linear--op-signature op) (plist-get org-linear--state :rejected-adds))
             (org-linear--log "Not created again: Linear refused \"%s\"; change it to retry"
@@ -719,12 +845,15 @@ changes."
 
 (defun org-linear-in-place--link-created (place view md task)
   "Link TASK, created from VIEW and sent with description MD, to its heading.
-PLACE is a plist with the heading's :file and :pending ID.  A heading
-whose file has unsaved edits is linked by a later sync."
+PLACE is a plist with the heading's :file and :pending ID, and the
+:relations the issue was created with.  A heading whose file has unsaved
+edits is linked by a later sync."
   (let ((base (append (copy-sequence view)
                       (list :desc-md (org-linear--stored-description task md)
                             :edited (alist-get 'last_edited_time task)
-                            :comment-ids nil :note-keys nil))))
+                            :comment-ids nil :note-keys nil)
+                      (when-let* ((relations (plist-get place :relations)))
+                        (list :org-rel relations :lin-rel relations)))))
     (puthash (alist-get 'id task) base (org-linear--state-tasks))
     (org-linear--save-state)
     (org-linear--count :created)
@@ -866,13 +995,1088 @@ Add the heading at the end if it is missing."
 (defun org-linear-in-place--refresh-cache (buffer)
   "Record BUFFER's file, as saved, in the scan cache.
 A file holding headings whose creation this sync sends or defers is
-marked to be read again by the next sync."
+marked to be read again by the next sync.  With a hierarchy, only such a
+file is, since the sync just read it: the text alone cannot tell a
+heading waiting for its creation from one that waits for a reason, such
+as an initiative while initiatives are turned off."
   (let* ((file (buffer-file-name buffer))
          (entry (org-linear-in-place--read-file
                  file buffer (file-attribute-modification-time (file-attributes file)))))
+    (when (org-linear-in-place--hierarchy-p)
+      (setq entry (plist-put entry :new nil)))
     (when (member file (plist-get org-linear--scan :unfinished))
       (setq entry (plist-put entry :new t)))
     (puthash file entry (org-linear-in-place--cache))))
+
+;;;; The hierarchy: headings and nodes
+
+(defun org-linear-in-place--hierarchy-p ()
+  "Return non-nil if project or milestone headings sync, by their options.
+Then the nesting of headings syncs too; see `org-linear-project-keywords'
+and `org-linear-milestone-keywords'."
+  (and (or org-linear-project-keywords org-linear-milestone-keywords) t))
+
+(defconst org-linear-in-place--object-kinds '(initiative project milestone)
+  "The kinds of Linear object a heading other than a task stands for.
+They are in the order in which a sync creates them.")
+
+(defun org-linear-in-place--property (kind &optional pending)
+  "Return the property that holds the ID of the KIND object of a heading.
+KIND is `issue', `project', `initiative' or `milestone'.  With PENDING,
+return the property that holds the ID its creation was sent with."
+  (concat "LINEAR_" (if pending "PENDING_" "")
+          (if (eq kind 'issue) "UUID" (upcase (symbol-name kind)))))
+
+(defun org-linear-in-place--heading-objects ()
+  "Return the projects, initiatives and milestones the heading at point holds.
+Each is (KIND ID PENDING): PENDING is non-nil when ID is that of a
+creation not yet confirmed."
+  (let ((properties (org-entry-properties nil 'standard))
+        objects)
+    (dolist (kind '(project initiative milestone))
+      (let ((id (cdr (assoc-string (org-linear-in-place--property kind) properties t)))
+            (pending (cdr (assoc-string (org-linear-in-place--property kind t) properties t))))
+        (cond (id (push (list kind id nil) objects))
+              (pending (push (list kind pending t) objects)))))
+    (nreverse objects)))
+
+(defun org-linear-in-place--heading-kind (keyword uuid objects)
+  "Return what the heading at point is: `task', `project', `milestone' or nil.
+KEYWORD is its TODO keyword, UUID its issue's ID and OBJECTS what
+`org-linear-in-place--heading-objects' returns for it.  Without a
+hierarchy, a heading with a keyword or an issue is a task.  With one, a
+heading is a project or a milestone by its keyword, or else by the
+objects it holds, so that a closed one stays what it was."
+  (cond
+   ((not (org-linear-in-place--hierarchy-p)) (and (or uuid keyword) 'task))
+   ((member keyword org-linear-project-keywords) 'project)
+   ((member keyword org-linear-milestone-keywords) 'milestone)
+   (uuid 'task)
+   ((seq-some (lambda (object) (memq (car object) '(project initiative))) objects) 'project)
+   (objects 'milestone)
+   ((member keyword org-not-done-keywords) 'task)))
+
+(defun org-linear-in-place--pop-stack (stack)
+  "Return STACK without the nodes of headings not above the heading at point."
+  (let ((level (org-outline-level)))
+    (while (and stack (>= (plist-get (car stack) :level) level))
+      (pop stack))
+    stack))
+
+(defun org-linear-in-place--node (kind keyword stack scan)
+  "Return a node for the heading at point, of KIND, with the TODO KEYWORD.
+A node is a plist: :kind; :marker, at the heading; :level; :open, non-nil
+if KEYWORD is open; :task and :project, the nearest task and project
+nodes above it; :milestone, the nearest milestone node above it with no
+project heading in between; and :holds-direct and :holds-projects,
+non-nil once a task or milestone, or a project, has it as its nearest
+project.  STACK holds the nodes above the heading, nearest first.  The
+node of a task is recorded in SCAN by its marker."
+  (let ((node (list :kind kind :marker (org-linear--marker) :level (org-outline-level)
+                    :open (and (member keyword org-not-done-keywords) t)
+                    :task (org-linear-in-place--nearest '(task) stack)
+                    :project (org-linear-in-place--nearest '(project) stack)
+                    :milestone (let ((node (org-linear-in-place--nearest
+                                            '(milestone project) stack)))
+                                 (and (eq (plist-get node :kind) 'milestone) node))
+                    :holds-direct nil :holds-projects nil)))
+    (when-let* ((project (plist-get node :project)))
+      (plist-put project (if (eq kind 'project) :holds-projects :holds-direct) t))
+    (when (eq kind 'task)
+      (puthash (plist-get node :marker) node (plist-get scan :node-of)))
+    node))
+
+(defun org-linear-in-place--nearest (kinds stack)
+  "Return the first node in STACK whose kind is one of KINDS."
+  (seq-find (lambda (node) (memq (plist-get node :kind) kinds)) stack))
+
+(defun org-linear-in-place--index-object (node objects scan)
+  "Add the project or milestone heading of NODE, holding OBJECTS, to SCAN.
+OBJECTS are as from `org-linear-in-place--heading-objects'; those of a
+kind the heading cannot stand for are ignored."
+  (pcase-dolist (`(,kind ,id ,pending) objects)
+    (when (eq (eq kind 'milestone) (eq (plist-get node :kind) 'milestone))
+      (cond
+       (pending (puthash id (cons kind node) (plist-get scan :object-pending)))
+       ((gethash id (plist-get scan :objects)) (puthash id t (plist-get scan :duplicates)))
+       (t (puthash id (cons kind node) (plist-get scan :objects)))))))
+
+(defun org-linear-in-place--needed-kinds (node)
+  "Return the kinds of Linear object the heading of NODE needs.
+A milestone needs a milestone.  A project heading that holds project
+headings needs an initiative, and one that holds tasks or milestones
+needs a project.  One that holds nothing needs a project, unless it has
+an initiative from when it held projects."
+  (if (eq (plist-get node :kind) 'milestone)
+      '(milestone)
+    (append (when (plist-get node :holds-projects) '(initiative))
+            (when (or (plist-get node :holds-direct)
+                      (not (or (plist-get node :holds-projects)
+                               (org-linear-in-place--object-id node 'initiative))))
+              '(project)))))
+
+(defun org-linear-in-place--node-kinds (node)
+  "Return the kinds of Linear object the heading of NODE needs or holds.
+A project heading keeps an object it no longer needs."
+  (seq-uniq (append (org-linear-in-place--needed-kinds node)
+                    (seq-filter (lambda (kind)
+                                  (org-entry-get (plist-get node :marker)
+                                                 (org-linear-in-place--property kind)))
+                                '(initiative project)))))
+
+(defun org-linear-in-place--missing-objects (node)
+  "Return the kinds of Linear object NODE's heading needs and has no ID for.
+Only an open project or milestone heading counts; one with only a
+pending ID does too, since its creation may need sending again."
+  (when (and (memq (plist-get node :kind) '(project milestone)) (plist-get node :open))
+    (seq-remove (lambda (kind)
+                  (org-entry-get (plist-get node :marker) (org-linear-in-place--property kind)))
+                (org-linear-in-place--needed-kinds node))))
+
+(defun org-linear-in-place--drop-nodes (buffer)
+  "Leave out of this sync the nodes and objects of the headings in BUFFER."
+  (let ((scan org-linear--scan)
+        (in-buffer (lambda (node) (eq (marker-buffer (plist-get node :marker)) buffer))))
+    (plist-put scan :nodes (seq-remove in-buffer (plist-get scan :nodes)))
+    (dolist (key '(:objects :object-pending))
+      (let ((table (plist-get scan key))
+            gone)
+        (maphash (lambda (id entry) (when (funcall in-buffer (cdr entry)) (push id gone))) table)
+        (dolist (id gone) (remhash id table))))))
+
+;;;; The hierarchy: relations
+
+(defun org-linear-in-place--relations (node kind)
+  "Return the relations Org gives the KIND object of NODE's heading, a plist.
+An issue has a :parent issue, a :project and a :milestone; a project an
+:initiative, its own if its heading has one, else that of the nearest
+project heading above; an initiative a :parent initiative; a milestone a
+:project.  A value is an ID, nil for none, or :wait while the heading
+it points to has no object yet but will get one."
+  (pcase kind
+    ('issue (list :parent (org-linear-in-place--target (plist-get node :task) 'issue)
+                  :project (org-linear-in-place--target (plist-get node :project) 'project)
+                  :milestone (org-linear-in-place--target (plist-get node :milestone) 'milestone)))
+    ('project (list :initiative (org-linear-in-place--target
+                                 (if (memq 'initiative (org-linear-in-place--node-kinds node))
+                                     node
+                                   (plist-get node :project))
+                                 'initiative)))
+    ('initiative (list :parent (org-linear-in-place--target (plist-get node :project) 'initiative)))
+    ('milestone (list :project (org-linear-in-place--target (plist-get node :project) 'project)))))
+
+(defun org-linear-in-place--object-id (node kind)
+  "Return the confirmed or pending ID of the KIND object of NODE's heading."
+  (let ((marker (plist-get node :marker)))
+    (or (org-entry-get marker (org-linear-in-place--property kind))
+        (org-entry-get marker (org-linear-in-place--property kind t)))))
+
+(defun org-linear-in-place--target (node kind)
+  "Return the ID of the KIND object of NODE's heading, for a relation to it.
+It is the confirmed or pending ID; nil without NODE or when its closed
+heading has none; and :wait when its open heading will get one."
+  (when node
+    (or (org-linear-in-place--object-id node kind)
+        (and (plist-get node :open) :wait))))
+
+(defun org-linear-in-place--ready (relations)
+  "Return RELATIONS without those waiting for their objects."
+  (cl-loop for (key value) on relations by #'cddr
+           unless (eq value :wait) append (list key value)))
+
+(defun org-linear-in-place--new-issue-relations (marker)
+  "Return the relations to create the issue of the new heading at MARKER with."
+  (when-let* ((node (and (org-linear-in-place--hierarchy-p)
+                         (gethash marker (plist-get org-linear--scan :node-of)))))
+    (org-linear-in-place--ready (org-linear-in-place--relations node 'issue))))
+
+(defun org-linear-in-place--merge-relations (name local remote base)
+  "Return (SEND ORG LINEAR): the relations to send and the new relation bases.
+LOCAL are the relations Org gives the object NAME and REMOTE those it has
+in Linear, plists; BASE holds those of the last sync, Org's as :org-rel
+and Linear's as :lin-rel.  The hierarchy lives in Org, so a relation
+changed in Org is sent, while one changed only in Linear is kept, since
+moving a heading is Org's to do, and the log says so.  When both
+changed, `org-linear-conflict-winner' decides.  A relation not yet known
+counts as none in Org and as unchanged in Linear, and one waiting for
+its object keeps its bases.  A relation to send keeps its bases until
+Linear confirms it."
+  (let ((org-base (plist-get base :org-rel))
+        (lin-base (plist-get base :lin-rel))
+        send org lin)
+    (cl-loop
+     for (key l) on local by #'cddr
+     do (let* ((r (plist-get remote key))
+               (bo (plist-get org-base key))
+               (bl (if (plist-member lin-base key) (plist-get lin-base key) r))
+               (field (substring (symbol-name key) 1)))
+          (cond
+           ((eq l :wait)
+            (setq org (plist-put org key bo) lin (plist-put lin key bl)))
+           ((equal l r)
+            (setq org (plist-put org key l) lin (plist-put lin key r)))
+           ((equal l bo)
+            (unless (equal r bl)
+              (org-linear--log "Kept Linear's %s of %s; move its heading to change it"
+                               field name))
+            (setq org (plist-put org key l) lin (plist-put lin key r)))
+           ((and (not (equal r bl)) (eq org-linear-conflict-winner 'linear))
+            (org-linear-in-place--log-conflict name field l r)
+            (setq org (plist-put org key l) lin (plist-put lin key r)))
+           (t
+            (unless (equal r bl)
+              (org-linear-in-place--log-conflict name field r l))
+            (setq send (plist-put send key l)
+                  org (plist-put org key bo)
+                  lin (plist-put lin key bl))))))
+    (list send org lin)))
+
+(defun org-linear-in-place--log-conflict (name field lost kept)
+  "Log that FIELD of NAME changed on both sides; LOST gave way to KEPT."
+  (org-linear--count :conflicts)
+  (if (eq org-linear-conflict-winner 'org)
+      (org-linear--log "Conflict in %s %s: kept yours, %S; Linear's %S is replaced"
+                       name field kept lost)
+    (org-linear--log "Conflict in %s %s: kept Linear's %S; your %S is not sent"
+                     name field kept lost)))
+
+(defun org-linear-in-place--sent-relations (base relations)
+  "Return BASE recording that RELATIONS, a plist, now hold in Org and Linear."
+  (let ((org (copy-sequence (plist-get base :org-rel)))
+        (lin (copy-sequence (plist-get base :lin-rel))))
+    (cl-loop for (key value) on relations by #'cddr
+             do (setq org (plist-put org key value)
+                      lin (plist-put lin key value)))
+    (plist-put (plist-put base :org-rel org) :lin-rel lin)))
+
+(defun org-linear-in-place--known-relations (op)
+  "Return OP with only the relations whose objects Linear has by now, or nil.
+An object Linear has is one the sync state holds.  A relation to a
+heading whose creation failed, or was not sent, waits for a later sync,
+and the log says so.  An edit of nothing but relations that keeps none
+is nil."
+  (let (kept)
+    (cl-loop for (key value) on (plist-get op :relations) by #'cddr
+             do (if (or (null value) (org-linear--table-of value))
+                    (setq kept (plist-put kept key value))
+                  (org-linear--log "Not sent yet: the %s of %s, which is not in Linear yet"
+                                   (substring (symbol-name key) 1)
+                                   (org-linear-in-place--op-name op))))
+    (let ((op (plist-put (copy-sequence op) :relations kept))
+          (place (plist-get op :marker)))
+      (when (and place (not (markerp place)))
+        (setq op (plist-put op :marker (plist-put (copy-sequence place) :relations kept))))
+      (unless (and (null kept)
+                   (memq (plist-get op :type) '(update object-relate))
+                   (null (plist-get op :fields)))
+        op))))
+
+(defun org-linear-in-place--op-name (op)
+  "Return a name for what OP edits, for the log."
+  (format "%s"
+          (or (plist-get op :title) (plist-get (plist-get op :view) :title) (plist-get op :id))))
+
+(defun org-linear-in-place--issue-relation-ops (task node)
+  "Merge the relations of TASK with those its heading's NODE gives it.
+Record the new relation bases and return the edit that sends Org's
+relations, if any.  A new project goes with the milestone Org gives,
+since a milestone belongs to one project."
+  (let* ((id (alist-get 'id task))
+         (base (gethash id (org-linear--state-tasks)))
+         (local (org-linear-in-place--relations node 'issue))
+         (remote (list :parent (alist-get 'parent_id task)
+                       :project (alist-get 'project_id task)
+                       :milestone (alist-get 'milestone_id task)))
+         (merged (org-linear-in-place--merge-relations
+                  (alist-get 'identifier task) local remote base))
+         (send (car merged)))
+    (when (and (plist-member send :project) (not (plist-member send :milestone))
+               (not (eq (plist-get local :milestone) :wait)))
+      (setq send (plist-put send :milestone (plist-get local :milestone))))
+    (puthash id (plist-put (plist-put base :org-rel (nth 1 merged)) :lin-rel (nth 2 merged))
+             (org-linear--state-tasks))
+    (when send
+      (org-linear-in-place--checked-ops
+       base
+       (list (list :type 'update :id id :title (alist-get 'identifier task)
+                   :team (alist-get 'team_id task) :fields nil
+                   :label-ids (alist-get 'label_ids task) :relations send))))))
+
+(defun org-linear-in-place--checked-ops (base ops)
+  "Return OPS without nils and without those Linear rejected, as BASE records."
+  (seq-filter (lambda (op)
+                (and op
+                     (if (member (org-linear--op-signature op) (plist-get base :rejected))
+                         (progn
+                           (org-linear--log "Not sent again: Linear refused this %s for %s"
+                                            (plist-get op :type)
+                                            (org-linear-in-place--op-name op))
+                           nil)
+                       t)))
+              ops))
+
+;;;; The hierarchy: fetching objects
+
+(defconst org-linear-in-place--object-fields
+  '((project . "id name content targetDate updatedAt trashed url status { id type }
+initiativeToProjects { nodes { id initiative { id } } }")
+    (initiative . "id name content targetDate updatedAt trashed url status
+parentInitiative { id }")
+    (milestone . "id name description targetDate updatedAt project { id }"))
+  "The fields the sync reads of each kind of Linear object.")
+
+(defconst org-linear-in-place--object-api
+  '((project :name "Project" :field project :query "project"
+             :create "projectCreate" :update "projectUpdate" :archive "projectDelete")
+    (initiative :name "Initiative" :field initiative :query "initiative"
+                :create "initiativeCreate" :update "initiativeUpdate"
+                :archive "initiativeArchive")
+    (milestone :name "Milestone" :field projectMilestone :query "projectMilestone"
+               :create "projectMilestoneCreate" :update "projectMilestoneUpdate"
+               :archive "projectMilestoneDelete"))
+  "How Linear's API names each kind of object and what is done to it.
+A project has no archive of its own: `projectDelete' moves it to the
+trash, which archives it and keeps it restorable.  A milestone can only
+be deleted.")
+
+(defun org-linear-in-place--api (kind key)
+  "Return the value of KEY in the API entry of KIND."
+  (plist-get (alist-get kind org-linear-in-place--object-api) key))
+
+(defun org-linear-in-place--fetch-objects (callback)
+  "Fetch the objects the sync manages or is creating, then call CALLBACK.
+CALLBACK gets them as from `org-linear-in-place--object'.  Without a
+hierarchy nothing is fetched and CALLBACK gets nil."
+  (if (not (org-linear-in-place--hierarchy-p))
+      (funcall callback nil)
+    (org-linear-in-place--fetch-object-chunks
+     (or (seq-partition (org-linear-in-place--object-ids) 50) (list nil)) nil callback)))
+
+(defun org-linear-in-place--object-ids ()
+  "Return the IDs of the objects the state or the scan knows."
+  (let ((ids (make-hash-table :test #'equal)))
+    (dolist (table (list (org-linear--state-objects)
+                         (plist-get org-linear--scan :objects)
+                         (plist-get org-linear--scan :object-pending)))
+      (maphash (lambda (id _) (puthash id t ids)) table))
+    (hash-table-keys ids)))
+
+(defun org-linear-in-place--fetch-object-chunks (chunks acc callback)
+  "Fetch the objects with the IDs in CHUNKS onto ACC, then call CALLBACK.
+CHUNKS is a list of lists of at most 50 IDs.  The project statuses, and
+whether the workspace has initiatives turned on, come along into
+`org-linear--meta', as :project-statuses and :initiatives."
+  (org-linear--graphql
+   (format "query OrgLinearObjects($ids: [ID!]) {
+  organization { roadmapEnabled }
+  projectStatuses { nodes { id name type position } }
+  projects(first: 50, filter: { id: { in: $ids } }, includeArchived: true) { nodes { %s } }
+  initiatives(first: 50, filter: { id: { in: $ids } }, includeArchived: true) { nodes { %s } }
+  projectMilestones(first: 50, filter: { id: { in: $ids } }, includeArchived: true) {
+    nodes { %s } } }"
+           (alist-get 'project org-linear-in-place--object-fields)
+           (alist-get 'initiative org-linear-in-place--object-fields)
+           (alist-get 'milestone org-linear-in-place--object-fields))
+   `((ids . ,(vconcat (car chunks))))
+   (lambda (data)
+     (plist-put org-linear--meta :project-statuses
+                (alist-get 'nodes (alist-get 'projectStatuses data)))
+     (plist-put org-linear--meta :initiatives
+                (eq (alist-get 'roadmapEnabled (alist-get 'organization data)) t))
+     (let ((acc (append acc
+                        (mapcar (lambda (node) (org-linear-in-place--object 'project node))
+                                (alist-get 'nodes (alist-get 'projects data)))
+                        (mapcar (lambda (node) (org-linear-in-place--object 'initiative node))
+                                (alist-get 'nodes (alist-get 'initiatives data)))
+                        (mapcar (lambda (node) (org-linear-in-place--object 'milestone node))
+                                (alist-get 'nodes (alist-get 'projectMilestones data))))))
+       (if (cdr chunks)
+           (org-linear-in-place--fetch-object-chunks (cdr chunks) acc callback)
+         (funcall callback acc))))))
+
+(defun org-linear-in-place--object (kind node)
+  "Return NODE, a Linear object of KIND as GraphQL gives it, as the sync uses it.
+That is a plist: :kind, :id, :title, :md (its Markdown description),
+:deadline, :edited and :trashed; for a project and an initiative, its
+:status, `open', `done' or `canceled'; for a project its :links to
+initiatives, (LINK-ID . INITIATIVE-ID); for an initiative its :parent;
+for a milestone its :project."
+  (append
+   (list :kind kind
+         :id (alist-get 'id node)
+         :title (alist-get 'name node)
+         :md (or (alist-get (if (eq kind 'milestone) 'description 'content) node) "")
+         :deadline (alist-get 'targetDate node)
+         :edited (alist-get 'updatedAt node)
+         :trashed (eq (alist-get 'trashed node) t))
+   (pcase kind
+     ('project
+      (list :status (pcase (alist-get 'type (alist-get 'status node))
+                      ("completed" 'done) ("canceled" 'canceled) (_ 'open))
+            :links (mapcar (lambda (link)
+                             (cons (alist-get 'id link)
+                                   (alist-get 'id (alist-get 'initiative link))))
+                           (alist-get 'nodes (alist-get 'initiativeToProjects node)))))
+     ('initiative
+      (list :status (pcase (alist-get 'status node)
+                      ("Completed" 'done) ("Canceled" 'canceled) (_ 'open))
+            :parent (alist-get 'id (alist-get 'parentInitiative node))))
+     ('milestone
+      (list :project (alist-get 'id (alist-get 'project node)))))))
+
+(defun org-linear-in-place--objects-by-id (objects)
+  "Return a hash table from the IDs of OBJECTS to them."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (object objects) (puthash (plist-get object :id) object table))
+    table))
+
+(defun org-linear-in-place--object-conversion-items (data)
+  "Return (KEY . MARKDOWN) for the descriptions of DATA's objects to convert.
+Those are the ones that changed since the last sync, of objects linked to
+headings the scan found.  The object of a creation whose answer was lost
+is linked later, and is not converted: its heading holds what was sent."
+  (let (items)
+    (dolist (object (alist-get 'objects data))
+      (let* ((id (plist-get object :id))
+             (base (gethash id (org-linear--state-objects))))
+        (when (and (gethash id (plist-get org-linear--scan :objects))
+                   (not (equal (plist-get object :md) (plist-get base :desc-md))))
+          (push (cons (cons 'desc id) (plist-get object :md)) items))))
+    (nreverse items)))
+
+(defun org-linear-in-place--object-body-pulls (data converted)
+  "Return the description edits of DATA's objects that would replace a body.
+Each is (ID MARKER BASE MD), as in `org-linear-in-place--body-pulls';
+CONVERTED holds the converted descriptions."
+  (let (pulls)
+    (dolist (object (alist-get 'objects data))
+      (let* ((id (plist-get object :id))
+             (entry (gethash id (plist-get org-linear--scan :objects)))
+             (marker (and entry (plist-get (cdr entry) :marker)))
+             (base (gethash id (org-linear--state-objects))))
+        (when (and marker base
+                   (gethash (cons 'desc id) converted)
+                   (not (equal (plist-get object :md) (plist-get base :desc-md)))
+                   (equal (org-linear-in-place--body-at marker) (plist-get base :body)))
+          (push (list id marker base (plist-get object :md)) pulls))))
+    (nreverse pulls)))
+
+;;;; The hierarchy: applying
+
+(defun org-linear-in-place--apply-hierarchy (data converted)
+  "Apply DATA to the files and return the edits to send, with a hierarchy.
+CONVERTED maps conversion keys to Org text.  Objects deleted in Linear
+cancel their headings first.  Then the objects and issues to create get
+their IDs, so that relations can name them, and the edits go out in the
+order Linear needs: new objects, edits of objects, new issues, edits of
+issues, and last what is archived."
+  (let* ((objects (org-linear-in-place--objects-by-id (alist-get 'objects data)))
+         (comments (org-linear--comments-by-issue data converted))
+         (fetched (make-hash-table :test #'equal))
+         object-creates issue-creates object-edits issue-edits)
+    (org-linear-in-place--cancel-deleted-objects objects)
+    (org-linear-in-place--link-found-objects objects)
+    (setq object-creates (org-linear-in-place--object-creation-ops org-linear--scan))
+    (setq issue-creates (org-linear-in-place--creation-ops
+                         org-linear--scan
+                         (max 0 (- org-linear-create-limit (length object-creates)))))
+    (setq object-edits (org-linear-in-place--object-merge-ops objects converted))
+    (dolist (task (alist-get 'tasks data))
+      (let ((id (alist-get 'id task)))
+        (puthash id t fetched)
+        (setq issue-edits (nconc issue-edits (org-linear-in-place--apply-task
+                                              task converted (gethash id comments))))))
+    (append object-creates object-edits issue-creates issue-edits
+            (org-linear-in-place--vanished-ops fetched))))
+
+(defun org-linear-in-place--cancel-deleted-objects (objects)
+  "Cancel the headings of synced objects that were deleted in Linear.
+OBJECTS maps the IDs of the fetched objects to them; a synced object that
+is missing or in the trash was deleted.  Its heading keeps its text,
+loses the object's ID and, unless closed, gets the cancelled keyword, so
+that the object is not created again."
+  (let (deleted)
+    (maphash (lambda (id entry)
+               (let ((object (gethash id objects)))
+                 (when (and (gethash id (org-linear--state-objects))
+                            (or (null object) (plist-get object :trashed)))
+                   (push (cons id entry) deleted))))
+             (plist-get org-linear--scan :objects))
+    (pcase-dolist (`(,id ,kind . ,node) deleted)
+      (let ((title (org-with-point-at (plist-get node :marker)
+                     (unless (member (org-get-todo-state) org-done-keywords)
+                       (org-linear--set-todo (org-linear-in-place--status-keyword 'canceled) nil))
+                     (org-entry-delete nil (org-linear-in-place--property kind))
+                     (org-get-heading t t t t))))
+        (plist-put node :open nil)
+        (remhash id (org-linear--state-objects))
+        (remhash id (plist-get org-linear--scan :objects))
+        (org-linear--log "Cancelled \"%s\": its %s was deleted in Linear" title kind)
+        (org-linear--count :pulled)))))
+
+(defun org-linear-in-place--link-found-objects (objects)
+  "Link the headings whose objects Linear has, though the answer was lost.
+OBJECTS maps the IDs of the fetched objects to them.  Each such heading
+gets the object's ID, and the state records it as the heading has it,
+with Linear's description, so that it merges from there."
+  (maphash (lambda (id entry)
+             (when-let* ((object (gethash id objects)))
+               (let ((kind (car entry))
+                     (node (cdr entry)))
+                 (org-with-point-at (plist-get node :marker)
+                   (org-entry-put nil (org-linear-in-place--property kind) id)
+                   (org-entry-delete nil (org-linear-in-place--property kind t)))
+                 (puthash id (append (org-linear-in-place--object-view node kind)
+                                     (list :kind kind :desc-md (plist-get object :md)
+                                           :edited (plist-get object :edited)))
+                          (org-linear--state-objects))
+                 (puthash id entry (plist-get org-linear--scan :objects))
+                 (org-linear--count :created))))
+           (plist-get org-linear--scan :object-pending)))
+
+(defun org-linear-in-place--object-merge-ops (objects converted)
+  "Merge the fetched OBJECTS with their headings and return the edits to send.
+OBJECTS maps IDs to objects; CONVERTED maps conversion keys to Org text."
+  (let (ops)
+    (maphash (lambda (id entry)
+               (let ((object (gethash id objects)))
+                 (cond
+                  ((gethash id (plist-get org-linear--scan :duplicates))
+                   (org-linear--log "Not synced: the %s %s has more than one heading; delete the copies"
+                                    (car entry) id))
+                  ((null object)
+                   (org-linear--log "Not synced: the %s %s is not in Linear" (car entry) id))
+                  (t
+                   (setq ops (nconc ops (org-linear-in-place--merge-object
+                                         object (cdr entry) converted)))))))
+             (plist-get org-linear--scan :objects))
+    ops))
+
+(defun org-linear-in-place--merge-object (object node converted)
+  "Merge the Linear OBJECT with the heading of NODE three-way; return the edits.
+As with an issue, a field changed on one side takes that side's value,
+and `org-linear-conflict-winner' decides when both changed.  The fields
+are the title, the body, the deadline and, but for a milestone, the
+status.  CONVERTED maps conversion keys to Org text."
+  (let* ((id (plist-get object :id))
+         (kind (plist-get object :kind))
+         (stored (gethash id (org-linear--state-objects)))
+         (held (eq (and org-linear--body-overrides (gethash id org-linear--body-overrides))
+                   :hold))
+         (remote (org-linear-in-place--object-remote-view object converted stored held))
+         (local (org-linear-in-place--object-view node kind))
+         (base (or stored (append (copy-sequence local) (list :kind kind))))
+         (new-base (copy-sequence base))
+         (name (format "%s \"%s\"" kind (plist-get local :title)))
+         pushed)
+    (dolist (field (org-linear-in-place--object-merge-fields kind))
+      (let ((l (plist-get local field))
+            (r (plist-get remote field))
+            (b (plist-get base field)))
+        (cond
+         ((equal l r) (setq new-base (plist-put new-base field r)))
+         ((equal l b)
+          (org-linear-in-place--set-object-field node field r)
+          (org-linear--count :pulled)
+          (setq new-base (plist-put new-base field r)))
+         ((equal r b) (push (cons field l) pushed))
+         ((eq org-linear-conflict-winner 'org)
+          (org-linear-in-place--log-conflict name (substring (symbol-name field) 1) r l)
+          (push (cons field l) pushed))
+         (t
+          (org-linear-in-place--set-object-field node field r)
+          (org-linear-in-place--log-conflict name (substring (symbol-name field) 1) l r)
+          (setq new-base (plist-put new-base field r))))))
+    (setq new-base (plist-put new-base :kind kind))
+    (setq new-base (plist-put new-base :desc-md (if held
+                                                    (plist-get base :desc-md)
+                                                  (plist-get object :md))))
+    (setq new-base (plist-put new-base :edited (plist-get object :edited)))
+    (let* ((local-relations (org-linear-in-place--relations node kind))
+           (merged (org-linear-in-place--merge-relations
+                    name local-relations
+                    (org-linear-in-place--remote-relations object local-relations base)
+                    new-base)))
+      (setq new-base (plist-put (plist-put new-base :org-rel (nth 1 merged))
+                                :lin-rel (nth 2 merged)))
+      (puthash id new-base (org-linear--state-objects))
+      (org-linear-in-place--checked-ops
+       new-base
+       (list (when pushed
+               (list :type 'object-update :kind kind :id id :title (plist-get local :title)
+                     :fields (nreverse pushed)))
+             (when (car merged)
+               (list :type 'object-relate :kind kind :id id :title (plist-get local :title)
+                     :relations (car merged) :links (plist-get object :links)
+                     :parent (plist-get object :parent))))))))
+
+(defun org-linear-in-place--object-merge-fields (kind)
+  "Return the fields the merge compares for an object of KIND."
+  (if (eq kind 'milestone)
+      '(:title :body :deadline)
+    '(:title :body :deadline :status)))
+
+(defun org-linear-in-place--object-view (node kind)
+  "Return the KIND object of NODE's heading as Org field values."
+  (org-with-point-at (plist-get node :marker)
+    (append (list :title (substring-no-properties (org-get-heading t t t t))
+                  :body (org-linear--body)
+                  :deadline (org-linear--planning-date "DEADLINE"))
+            (unless (eq kind 'milestone)
+              (list :status (org-linear-in-place--status (org-get-todo-state)))))))
+
+(defun org-linear-in-place--object-remote-view (object converted base held)
+  "Return OBJECT from Linear as Org field values.
+CONVERTED maps conversion keys to Org text, and BASE supplies the body
+when the description is unchanged, or HELD back."
+  (let ((id (plist-get object :id)))
+    (list :title (plist-get object :title)
+          :body (or (and held (or (plist-get base :body) ""))
+                    (let ((override (and org-linear--body-overrides
+                                         (gethash id org-linear--body-overrides))))
+                      (and (stringp override) override))
+                    (gethash (cons 'desc id) converted)
+                    (plist-get base :body)
+                    "")
+          :deadline (plist-get object :deadline)
+          :status (plist-get object :status))))
+
+(defun org-linear-in-place--remote-relations (object local base)
+  "Return the relations OBJECT has in Linear, a plist like LOCAL.
+A project can be in several initiatives: its initiative is the one Org
+gives it when it is among them, else that of the last sync, as BASE
+records it, else any."
+  (pcase (plist-get object :kind)
+    ('project
+     (let ((initiatives (mapcar #'cdr (plist-get object :links)))
+           (wanted (plist-get local :initiative))
+           (last (plist-get (plist-get base :lin-rel) :initiative)))
+       (list :initiative (cond ((member wanted initiatives) wanted)
+                               ((member last initiatives) last)
+                               (t (car initiatives))))))
+    ('initiative (list :parent (plist-get object :parent)))
+    ('milestone (list :project (plist-get object :project)))))
+
+(defun org-linear-in-place--status (keyword)
+  "Return the status of a project or initiative whose heading has KEYWORD.
+That is `open' for an open keyword or none, `canceled' for a done one
+sent as a canceled workflow state, and `done' for any other done one."
+  (cond
+   ((not (member keyword org-done-keywords)) 'open)
+   ((or (member (alist-get 'type (org-linear--keyword-state
+                                  keyword (alist-get 'id (car (plist-get org-linear--meta :teams)))))
+                '("canceled" "duplicate"))
+        (equal keyword (cdr (assoc "canceled" org-linear-type-keywords))))
+    'canceled)
+   (t 'done)))
+
+(defun org-linear-in-place--status-keyword (status)
+  "Return the keyword that gives a project heading STATUS."
+  (pcase status
+    ('open (or (car org-linear-project-keywords) (org-linear--org-keyword nil nil)))
+    ('done (org-linear--org-keyword (cdr (assoc "completed" org-linear-type-keywords)) t))
+    (_ (org-linear--org-keyword (cdr (assoc "canceled" org-linear-type-keywords)) t))))
+
+(defun org-linear-in-place--set-object-field (node field value)
+  "Set FIELD of the heading of NODE to VALUE, as Linear has it."
+  (org-with-point-at (plist-get node :marker)
+    (pcase field
+      (:title (org-edit-headline value))
+      (:body (org-linear--set-body value))
+      (:deadline (org-linear--set-planning 'deadline value))
+      (:status (org-linear--set-todo (org-linear-in-place--status-keyword value) nil)))))
+
+;;;; The hierarchy: creating objects
+
+(defun org-linear-in-place--object-creation-ops (scan)
+  "Return edits that create the objects that new headings in SCAN stand for.
+Initiatives come first, then projects, then milestones, each in the
+order of their headings, and at most `org-linear-create-limit' are
+created; the rest wait for the next syncs.  Each heading gets the
+object's ID as a pending property before anything is sent, as a new
+issue's does."
+  (let ((wanted (org-linear-in-place--wanted-objects scan))
+        (count 0)
+        chosen ops)
+    (pcase-dolist (`(,kind . ,node) wanted)
+      (if (< count org-linear-create-limit)
+          (progn
+            (cl-incf count)
+            (org-linear-in-place--ensure-pending node kind)
+            (push (cons kind node) chosen))
+        (org-linear-in-place--mark-unfinished (marker-buffer (plist-get node :marker)))))
+    (when (> (length wanted) count)
+      (org-linear--log "Creating %d of %d new projects, initiatives and milestones; the rest follow in the next syncs"
+                       count (length wanted)))
+    (pcase-dolist (`(,kind . ,node) (nreverse chosen))
+      (when-let* ((op (org-linear-in-place--object-add-op kind node)))
+        (if (member (org-linear--op-signature op) (plist-get org-linear--state :rejected-adds))
+            (org-linear--log "Not created again: Linear refused the %s \"%s\"; change it to retry"
+                             kind (plist-get (plist-get op :view) :title))
+          (org-linear-in-place--mark-unfinished (marker-buffer (plist-get node :marker)))
+          (push op ops))))
+    (nreverse ops)))
+
+(defun org-linear-in-place--wanted-objects (scan)
+  "Return (KIND . NODE) for each object a heading in SCAN needs and has not got.
+They are in the order `org-linear-in-place--object-kinds' gives.
+Initiatives are left out while the workspace has them turned off, and
+the log says so; the projects that would be in them are created all the
+same, and join them once they exist."
+  (let (wanted off)
+    (dolist (node (plist-get scan :nodes))
+      (dolist (kind (org-linear-in-place--missing-objects node))
+        (if (and (eq kind 'initiative) (not (plist-get org-linear--meta :initiatives)))
+            (push node off)
+          (push (cons kind node) wanted))))
+    (when off
+      (org-linear--log "Not created: %d initiatives, since initiatives are turned off in this Linear workspace (Settings, Initiatives)"
+                       (length off)))
+    (sort (nreverse wanted)
+          (lambda (a b)
+            (< (seq-position org-linear-in-place--object-kinds (car a))
+               (seq-position org-linear-in-place--object-kinds (car b)))))))
+
+(defun org-linear-in-place--ensure-pending (node kind)
+  "Return the ID the KIND object of NODE's heading is created with.
+That is the heading's pending ID, or a new one the heading gets."
+  (let ((marker (plist-get node :marker))
+        (property (org-linear-in-place--property kind t)))
+    (or (org-entry-get marker property)
+        (let ((id (org-id-uuid)))
+          (org-entry-put marker property id)
+          id))))
+
+(defun org-linear-in-place--object-add-op (kind node)
+  "Return the edit that creates the KIND object of NODE's heading, or nil.
+A milestone needs a project heading above it with a project."
+  (let* ((marker (plist-get node :marker))
+         (pending (org-entry-get marker (org-linear-in-place--property kind t)))
+         (view (org-linear-in-place--object-view node kind))
+         (relations (org-linear-in-place--ready (org-linear-in-place--relations node kind))))
+    (if (and (eq kind 'milestone) (null (plist-get relations :project)))
+        (progn
+          (org-linear--log "Not created: the milestone \"%s\" needs a project heading above it with a project"
+                           (plist-get view :title))
+          nil)
+      (list :type 'object-add :kind kind :view view :relations relations :pending pending
+            :team (alist-get 'id (car (plist-get org-linear--meta :teams)))
+            :place (list :file (buffer-file-name (marker-buffer marker)) :pending pending)))))
+
+;;;; The hierarchy: sending edits
+
+(defun org-linear-in-place--run-object (op next)
+  "Send OP, an edit of a project, initiative or milestone, then call NEXT."
+  (pcase (plist-get op :type)
+    ('object-add (org-linear-in-place--run-object-add op next))
+    ('object-update (org-linear-in-place--run-object-update op next))
+    ('object-relate (org-linear-in-place--run-object-relate op next))
+    ('object-archive (org-linear-in-place--run-object-archive op next))))
+
+(defun org-linear-in-place--mutation (kind action)
+  "Return the GraphQL mutation that does ACTION, `create' or `update', to KIND."
+  (let ((name (org-linear-in-place--api kind :name))
+        (type (if (eq kind 'milestone) "ProjectMilestone" (org-linear-in-place--api kind :name)))
+        (field (org-linear-in-place--api kind :field))
+        (fields (alist-get kind org-linear-in-place--object-fields)))
+    (pcase action
+      ('create
+       (format "mutation OrgLinear%sCreate($input: %sCreateInput!) {
+  %s(input: $input) { success %s { %s } } }"
+               name type (org-linear-in-place--api kind :create) field fields))
+      ('update
+       (format "mutation OrgLinear%sUpdate($id: String!, $input: %sUpdateInput!) {
+  %s(id: $id, input: $input) { success %s { %s } } }"
+               name type (org-linear-in-place--api kind :update) field fields)))))
+
+(defun org-linear-in-place--payload (kind action data)
+  "Return the object of KIND that DATA, the answer to ACTION, holds.
+ACTION is :create or :update."
+  (alist-get (org-linear-in-place--api kind :field)
+             (alist-get (intern (org-linear-in-place--api kind action)) data)))
+
+(defun org-linear-in-place--status-input (kind status)
+  "Return the input entry that gives an object of KIND the STATUS, or nil.
+A project takes the first workspace status of the type that STATUS
+stands for, `started' for an open one; an initiative takes Active,
+Completed or Canceled."
+  (pcase kind
+    ('initiative `(status . ,(pcase status ('open "Active") ('done "Completed") (_ "Canceled"))))
+    ('project
+     (let* ((type (pcase status ('open "started") ('done "completed") (_ "canceled")))
+            (statuses (seq-filter (lambda (s) (equal (alist-get 'type s) type))
+                                  (plist-get org-linear--meta :project-statuses)))
+            (first (car (sort (copy-sequence statuses)
+                              (lambda (a b) (< (alist-get 'position a) (alist-get 'position b)))))))
+       (if first
+           `(statusId . ,(alist-get 'id first))
+         (org-linear--log "Not sent: Linear has no project status of type %s" type)
+         nil)))))
+
+(defun org-linear-in-place--description-key (kind)
+  "Return the input key of the Markdown description of an object of KIND."
+  (if (eq kind 'milestone) 'description 'content))
+
+(defun org-linear-in-place--run-object-add (op next)
+  "Create the object of OP, link its heading and relate it; then call NEXT.
+The object is created with the ID its heading holds as a pending
+property, so that a lost answer is found by the next sync."
+  (let* ((kind (plist-get op :kind))
+         (view (plist-get op :view)))
+    (if (and (eq kind 'milestone) (null (plist-get (plist-get op :relations) :project)))
+        (progn
+          (org-linear--log "Not created yet: the milestone \"%s\" waits for its project"
+                           (plist-get view :title))
+          (funcall next))
+      (org-linear--org-to-md
+       (plist-get view :body)
+       (lambda (md)
+         (org-linear--graphql
+          (org-linear-in-place--mutation kind 'create)
+          `((input . ,(org-linear-in-place--create-input op md)))
+          (lambda (data)
+            (let ((object (org-linear-in-place--object
+                           kind (org-linear-in-place--payload kind :create data))))
+              (org-linear-in-place--record-created op object)
+              (org-linear-in-place--relate-created op object next)))
+          (org-linear--rejected-handler op next)))))))
+
+(defun org-linear-in-place--create-input (op md)
+  "Return the input that creates the object of OP, with the description MD."
+  (let ((kind (plist-get op :kind))
+        (view (plist-get op :view)))
+    (append `((id . ,(plist-get op :pending))
+              (name . ,(plist-get view :title))
+              (,(org-linear-in-place--description-key kind) . ,md))
+            (pcase kind
+              ('project `((teamIds . ,(vector (plist-get op :team)))))
+              ('milestone `((projectId . ,(plist-get (plist-get op :relations) :project)))))
+            (when (plist-get view :deadline)
+              `((targetDate . ,(plist-get view :deadline))))
+            (when-let* ((status (and (plist-get view :status)
+                                     (org-linear-in-place--status-input
+                                      kind (plist-get view :status)))))
+              (list status)))))
+
+(defun org-linear-in-place--record-created (op object)
+  "Record OBJECT, just created for OP, and link its heading to it.
+The state keeps the description Linear stored, which Linear rewrites,
+and the relations the object was created with.  The heading is linked
+by its pending ID, wherever it is now, as a new issue's is."
+  (let* ((kind (plist-get op :kind))
+         (id (plist-get object :id))
+         (place (plist-get op :place))
+         (sent (and (eq kind 'milestone) (plist-get op :relations))))
+    (puthash id (append (copy-sequence (plist-get op :view))
+                        (list :kind kind :desc-md (plist-get object :md)
+                              :edited (plist-get object :edited)
+                              :org-rel sent :lin-rel sent))
+             (org-linear--state-objects))
+    (org-linear--save-state)
+    (org-linear--count :created)
+    (org-linear-in-place--edit-file
+     (plist-get place :file)
+     (lambda ()
+       (if-let* ((pos (org-find-property (org-linear-in-place--property kind t)
+                                         (plist-get place :pending))))
+           (progn
+             (org-entry-put pos (org-linear-in-place--property kind) id)
+             (org-entry-delete pos (org-linear-in-place--property kind t)))
+         (org-linear--log "Created the %s \"%s\", but its heading is no longer in %s"
+                          kind (plist-get object :title) (plist-get place :file)))))))
+
+(defun org-linear-in-place--relate-created (op object next)
+  "Put OBJECT, just created for OP, where OP's relations say; then call NEXT.
+A project goes into its initiative and an initiative under its parent.
+A relation Linear refuses is logged and recorded as sent, so that it is
+not sent again until the heading moves."
+  (let* ((kind (plist-get op :kind))
+         (id (plist-get object :id))
+         (key (pcase kind ('project :initiative) ('initiative :parent)))
+         (target (and key (plist-get (plist-get op :relations) key)))
+         (record (lambda (&optional refusal)
+                   (let ((base (gethash id (org-linear--state-objects))))
+                     (when refusal
+                       (org-linear--count :errors)
+                       (org-linear--log "Not related: the %s \"%s\" to its %s: %s"
+                                        kind (plist-get object :title)
+                                        (substring (symbol-name key) 1) refusal))
+                     (puthash id (plist-put
+                                  (plist-put base :org-rel
+                                             (plist-put (copy-sequence (plist-get base :org-rel))
+                                                        key target))
+                                  :lin-rel (plist-put (copy-sequence (plist-get base :lin-rel))
+                                                      key (unless refusal target)))
+                              (org-linear--state-objects))
+                     (org-linear--save-state)
+                     (funcall next))))
+         (refused (lambda (message &rest _) (funcall record message))))
+    (pcase (and target kind)
+      ('project (org-linear-in-place--relink-project id target nil nil record refused))
+      ('initiative (org-linear-in-place--reparent-initiative id target nil record refused))
+      (_ (funcall next)))))
+
+(defun org-linear-in-place--run-object-update (op next)
+  "Send the field changes of OP to its object, then call NEXT.
+As with an issue, the object's last edit is checked first, and the
+write is refused if it changed since the sync read it."
+  (let* ((kind (plist-get op :kind))
+         (id (plist-get op :id))
+         (base (gethash id (org-linear--state-objects))))
+    (org-linear--graphql
+     (format "query OrgLinear%sEdited($id: String!) { %s(id: $id) { updatedAt } }"
+             (org-linear-in-place--api kind :name) (org-linear-in-place--api kind :query))
+     `((id . ,id))
+     (lambda (data)
+       (if (not (equal (alist-get 'updatedAt
+                                  (alist-get (intern (org-linear-in-place--api kind :query)) data))
+                       (plist-get base :edited)))
+           (funcall (org-linear--refused-handler next)
+                    (format "the %s %s was edited in Linear meanwhile"
+                            kind (org-linear-in-place--op-name op)))
+         (org-linear-in-place--update-input
+          kind (plist-get op :fields)
+          (lambda (input)
+            (org-linear--graphql
+             (org-linear-in-place--mutation kind 'update)
+             `((id . ,id) (input . ,input))
+             (lambda (data)
+               (let ((object (org-linear-in-place--object
+                              kind (org-linear-in-place--payload kind :update data))))
+                 (dolist (field (plist-get op :fields))
+                   (setq base (plist-put base (car field) (cdr field))))
+                 (setq base (plist-put base :desc-md (plist-get object :md)))
+                 (org-linear-in-place--after-object-write id base (plist-get object :edited))
+                 (funcall next)))
+             (org-linear--rejected-handler op next))))))
+     (org-linear--rejected-handler op next))))
+
+(defun org-linear-in-place--update-input (kind fields callback)
+  "Call CALLBACK with the input that sets FIELDS of an object of KIND."
+  (let ((input (delq nil (mapcar (lambda (field)
+                                   (pcase (car field)
+                                     (:title `(name . ,(cdr field)))
+                                     (:deadline `(targetDate . ,(or (cdr field) :null)))
+                                     (:status (org-linear-in-place--status-input
+                                               kind (cdr field)))))
+                                 fields)))
+        (body (assq :body fields)))
+    (if body
+        (org-linear--org-to-md
+         (cdr body)
+         (lambda (md)
+           (funcall callback (cons (cons (org-linear-in-place--description-key kind) md)
+                                   input))))
+      (funcall callback input))))
+
+(defun org-linear-in-place--after-object-write (id base edited)
+  "Record BASE for object ID after a write, which left it last EDITED then."
+  (puthash id (plist-put base :edited edited) (org-linear--state-objects))
+  (org-linear--save-state)
+  (org-linear--count :pushed))
+
+(defun org-linear-in-place--run-object-relate (op next)
+  "Send the relations of OP, its object's place in the hierarchy; then NEXT."
+  (let* ((kind (plist-get op :kind))
+         (id (plist-get op :id))
+         (relations (plist-get op :relations))
+         (base (gethash id (org-linear--state-objects)))
+         (done (lambda (&rest _)
+                 (puthash id (org-linear-in-place--sent-relations base relations)
+                          (org-linear--state-objects))
+                 (org-linear--save-state)
+                 (org-linear--count :pushed)
+                 (funcall next)))
+         (refused (org-linear--rejected-handler op next)))
+    (pcase kind
+      ('milestone
+       (if-let* ((project (plist-get relations :project)))
+           (org-linear--graphql
+            (org-linear-in-place--mutation 'milestone 'update)
+            `((id . ,id) (input . ((projectId . ,project))))
+            done refused)
+         (org-linear--log "Not moved: the milestone \"%s\" needs a project heading above it with a project"
+                          (org-linear-in-place--op-name op))
+         (funcall next)))
+      ('project
+       (org-linear-in-place--relink-project
+        id (plist-get relations :initiative) (plist-get (plist-get base :org-rel) :initiative)
+        (plist-get op :links) done refused))
+      ('initiative
+       (org-linear-in-place--reparent-initiative
+        id (plist-get relations :parent) (plist-get op :parent) done refused)))))
+
+(defun org-linear-in-place--relink-project (id new old links then refused)
+  "Put the project ID in the initiative NEW instead of OLD, then call THEN.
+LINKS are the project's links to initiatives, (LINK-ID . INITIATIVE-ID).
+Only the link to OLD, which the sync made, is removed, since a project
+can be in several initiatives.  REFUSED handles an error."
+  (let ((stale (and old (not (equal old new)) (car (rassoc old links))))
+        (link (lambda (&rest _)
+                (if (or (null new) (rassoc new links))
+                    (funcall then)
+                  (org-linear--graphql
+                   "mutation OrgLinearProjectLink($input: InitiativeToProjectCreateInput!) {
+  initiativeToProjectCreate(input: $input) { success } }"
+                   `((input . ((projectId . ,id) (initiativeId . ,new))))
+                   (lambda (_) (funcall then))
+                   refused)))))
+    (if (not stale)
+        (funcall link)
+      (org-linear--graphql
+       "mutation OrgLinearProjectUnlink($id: String!) {
+  initiativeToProjectDelete(id: $id) { success } }"
+       `((id . ,stale))
+       link refused))))
+
+(defun org-linear-in-place--reparent-initiative (id new current then refused)
+  "Make NEW the parent of the initiative ID instead of CURRENT; then call THEN.
+Either can be nil, for none.  REFUSED handles an error."
+  (let ((link (lambda (&rest _)
+                (if (or (null new) (equal new current))
+                    (funcall then)
+                  (org-linear--graphql
+                   "mutation OrgLinearInitiativeParent($input: InitiativeRelationCreateInput!) {
+  initiativeRelationCreate(input: $input) { success } }"
+                   `((input . ((initiativeId . ,new) (relatedInitiativeId . ,id))))
+                   (lambda (_) (funcall then))
+                   refused)))))
+    (if (or (null current) (equal current new))
+        (funcall link)
+      (org-linear--graphql
+       "query OrgLinearInitiativeRelations {
+  initiativeRelations(first: 250) { nodes { id initiative { id } relatedInitiative { id } } } }"
+       nil
+       (lambda (data)
+         (if-let* ((relation (seq-find
+                              (lambda (r)
+                                (and (equal (alist-get 'id (alist-get 'relatedInitiative r)) id)
+                                     (equal (alist-get 'id (alist-get 'initiative r)) current)))
+                              (alist-get 'nodes (alist-get 'initiativeRelations data)))))
+             (org-linear--graphql
+              "mutation OrgLinearInitiativeUnparent($id: String!) {
+  initiativeRelationDelete(id: $id) { success } }"
+              `((id . ,(alist-get 'id relation)))
+              link refused)
+           (funcall link)))
+       refused))))
+
+(defun org-linear-in-place--run-object-archive (op next)
+  "Archive the object of OP in Linear, or delete it if a milestone; then NEXT."
+  (let ((kind (plist-get op :kind))
+        (id (plist-get op :id)))
+    (org-linear--graphql
+     (format "mutation OrgLinear%sArchive($id: String!) { %s(id: $id) { success } }"
+             (org-linear-in-place--api kind :name) (org-linear-in-place--api kind :archive))
+     `((id . ,id))
+     (lambda (_)
+       (remhash id (org-linear--state-objects))
+       (org-linear--save-state)
+       (org-linear--log "%s the %s %s in Linear: its heading is no longer in Org"
+                        (if (eq kind 'milestone) "Deleted" "Archived") kind id)
+       (org-linear--count :archived)
+       (funcall next))
+     (org-linear--rejected-handler op next))))
 
 ;;;; Preview
 
@@ -894,12 +2098,24 @@ or the one you choose with a prefix argument."
       (dolist (marker (plist-get scan :new))
         (push (org-with-point-at marker (org-get-heading t t t t))
               (gethash (buffer-file-name (marker-buffer marker)) by-file)))
+      (dolist (node (plist-get scan :nodes))
+        (when-let* ((kinds (org-linear-in-place--missing-objects node)))
+          (push (format "%s (%s)"
+                        (org-with-point-at (plist-get node :marker) (org-get-heading t t t t))
+                        (mapconcat #'symbol-name kinds " and "))
+                (gethash (buffer-file-name (marker-buffer (plist-get node :marker))) by-file))))
       (with-current-buffer (get-buffer-create "*org-linear preview*")
         (let ((inhibit-read-only t))
           (erase-buffer)
-          (insert (format "Linked headings in scope: %d\nNew headings to create: %d (at most %d per sync)\n\n"
+          (insert (format "Linked headings in scope: %d\nNew headings to create: %d (at most %d per sync)\n"
                           (hash-table-count (plist-get scan :tasks))
                           (length (plist-get scan :new)) org-linear-create-limit))
+          (when (org-linear-in-place--hierarchy-p)
+            (insert (format "New projects, initiatives and milestones to create: %d\n"
+                            (apply #'+ (mapcar (lambda (node)
+                                                 (length (org-linear-in-place--missing-objects node)))
+                                               (plist-get scan :nodes))))))
+          (insert "\n")
           (maphash (lambda (file titles)
                      (insert (format "%s (%d)\n" (abbreviate-file-name file) (length titles)))
                      (dolist (title (nreverse titles)) (insert "  " title "\n")))

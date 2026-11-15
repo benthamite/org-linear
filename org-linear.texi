@@ -57,6 +57,10 @@ User options
 * Programs::
 * Profiles::
 
+The in-place layout
+
+* Projects@comma{} initiatives and milestones: Projects initiatives and milestones. 
+
 Indices
 
 * Function index::
@@ -494,6 +498,82 @@ A configuration might look like this:
 @vindex org-linear-inbox-heading
 @vindex org-linear-conflict-winner
 @vindex org-linear-assign-new-issues
+
+@menu
+* Projects@comma{} initiatives and milestones: Projects initiatives and milestones. 
+@end menu
+
+@node Projects initiatives and milestones
+@section Projects@comma{} initiatives and milestones
+
+@vindex org-linear-project-keywords
+@vindex org-linear-milestone-keywords
+By default each TODO heading is an issue of its own@comma{} whatever headings it sits under. Set @code{org-linear-project-keywords} to the keywords of your project headings@comma{} such as @samp{"PROJECT"}@comma{} and @code{org-linear-milestone-keywords} to those of your milestone headings@comma{} such as @samp{"MILESTONE"}@comma{} and the nesting syncs too. Both are @samp{nil} by default@comma{} which leaves the layout as described above. A heading with one of these keywords is never an issue. The keywords must be TODO keywords of your files@comma{} and must not be in @code{org-linear-exclude-keywords}@comma{} which would leave their headings out.
+
+A @emph{task} here is any heading synced as an issue. The headings map to Linear as follows:
+
+@itemize
+@item
+A task under another task is a sub-issue of the nearest task above it.
+@item
+A project heading that holds tasks or milestones becomes a Linear project in the team. It holds them when no other project heading comes between@comma{} so a task under a task under it counts.
+@item
+A project heading that holds only project headings becomes an initiative. Under another project heading@comma{} it becomes a sub-initiative of that heading's initiative.
+@item
+A project heading that holds both becomes an initiative@comma{} and a Linear project for its own tasks and milestones@comma{} since Linear has nothing that is both.
+@item
+A project heading that holds nothing becomes a Linear project.
+@item
+A Linear project belongs to its own heading's initiative@comma{} if it has one@comma{} or else to that of the nearest project heading above it.
+@item
+A milestone heading becomes a milestone of the Linear project of the nearest project heading above it. Without one@comma{} it is not synced@comma{} and the log says so.
+@item
+An issue belongs to the Linear project of the nearest project heading above it@comma{} and to the milestone of the nearest milestone heading between it and that project heading.
+@end itemize
+
+For example:
+
+@example
+* PROJECT Website                 initiative and project
+** TODO Pick a domain             issue in the project Website
+** PROJECT Shop                   project in the initiative Website
+*** MILESTONE Launch              milestone of Shop
+**** TODO Write the copy          issue in Shop@comma{} milestone Launch
+***** TODO Draft the headline     sub-issue of Write the copy@comma{} in Shop and Launch
+@end example
+
+Each heading keeps the IDs of its Linear objects in properties@comma{} as an issue's heading keeps @samp{LINEAR_UUID}: @samp{LINEAR_PROJECT} for a project@comma{} @samp{LINEAR_INITIATIVE} for an initiative and @samp{LINEAR_MILESTONE} for a milestone. A project heading that is both holds both IDs. The sync maintains them; do not edit them.
+
+A heading's title is its object's name@comma{} its body the description (a project's or initiative's overview)@comma{} and its @samp{DEADLINE} the target date. A project heading's keyword gives the status of its project and initiative: an open keyword makes a started project and an active initiative@comma{} a done keyword a completed one@comma{} and a done keyword sent as a canceled workflow state@comma{} by @code{org-linear-keyword-states} or @code{org-linear-type-keywords}@comma{} a canceled one. A project that Linear moves to another open status@comma{} such as planned@comma{} keeps its heading's keyword. These fields merge both ways@comma{} as an issue's do@comma{} with @code{org-linear-conflict-winner} deciding when both sides changed. A milestone's keyword is not synced@comma{} since Linear works out a milestone's status itself.
+
+Identity stays with the heading's properties@comma{} so moving a heading keeps its objects and changes only its relations@comma{} which the next sync sends. Refile a task under another task and it becomes that task's sub-issue; refile a project heading under another one and its project joins that heading's initiative and leaves the one the sync had put it in. The nesting lives in Org: a relation changed in Linear@comma{} such as an issue moved there to another project@comma{} stays until you move the heading@comma{} and the log says so. A project heading keeps the objects it has when what it holds changes@comma{} and gets those it now needs.
+
+The safeguards for issues apply to these objects too:
+
+@itemize
+@item
+A new project@comma{} initiative or milestone gets its ID as @samp{LINEAR_PENDING_PROJECT}@comma{} @samp{LINEAR_PENDING_INITIATIVE} or @samp{LINEAR_PENDING_MILESTONE} before anything is sent@comma{} and its file is saved. New objects count toward @code{org-linear-create-limit}@comma{} and come before the sync's new issues: first initiatives@comma{} then projects@comma{} then milestones.
+@item
+A project or initiative whose heading is no longer in any file is archived in Linear@comma{} and a milestone deleted@comma{} on the same terms as issues. The vanished issues and objects of a sync count together toward @code{org-linear-archive-limit}. Linear's only archive for a project is its trash@comma{} from which the project can be restored.
+@item
+An object deleted in Linear cancels its heading@comma{} which keeps its text and loses the ID@comma{} so that the object is not created again.
+@end itemize
+
+Initiatives must be turned on in Linear@comma{} under Settings@comma{} Initiatives. While they are off@comma{} the sync creates none and logs how many it left out; the projects are created all the same@comma{} and join their initiatives once those exist. Sub-initiatives need Linear's Enterprise plan: elsewhere Linear refuses to nest an initiative@comma{} and the sync logs the refusal and does not send it again until the heading moves.
+
+@samp{M-x org-linear-preview} also lists the projects@comma{} initiatives and milestones the next sync would create.
+
+@lisp
+(setq org-linear-profiles
+      '((personal :layout in-place
+                  :teams ("ME")
+                  :directories ("~/notes")
+                  :project-keywords ("PROJECT")
+                  :milestone-keywords ("MILESTONE")
+                  :conflict-winner org)))
+@end lisp
+
+Turning the options on makes the next sync read every file again and send the relations of the issues already linked@comma{} so expect that sync to be a large one.
 
 @node Limits
 @chapter Limits

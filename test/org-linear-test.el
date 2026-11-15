@@ -63,6 +63,32 @@ A name means its next call; (NAME COUNT) means its COUNTth call from now.")
          (setq org-linear-test--fail-next nil)
          t)))))
 
+(defvar org-linear-test--projects nil
+  "Hash table from project ID to the fake project, in GraphQL shape.")
+
+(defvar org-linear-test--initiatives nil
+  "Hash table from initiative ID to the fake initiative, in GraphQL shape.")
+
+(defvar org-linear-test--milestones nil
+  "Hash table from milestone ID to the fake project milestone, in GraphQL shape.")
+
+(defvar org-linear-test--links nil
+  "The fake links of projects to initiatives: (ID PROJECT INITIATIVE).")
+
+(defvar org-linear-test--parents nil
+  "The fake relations of initiatives to their parents: (ID PARENT CHILD).")
+
+(defvar org-linear-test--initiatives-disabled nil
+  "Non-nil makes the fake refuse initiatives, as a workspace without them does.")
+
+(defconst org-linear-test--project-statuses
+  '(((id . "ps-backlog") (name . "Backlog") (type . "backlog") (position . 0))
+    ((id . "ps-planned") (name . "Planned") (type . "planned") (position . 1))
+    ((id . "ps-started") (name . "In Progress") (type . "started") (position . 2))
+    ((id . "ps-done") (name . "Completed") (type . "completed") (position . 3))
+    ((id . "ps-canceled") (name . "Canceled") (type . "canceled") (position . 4)))
+  "The fake workspace's project statuses.")
+
 (defconst org-linear-test--states
   '(((id . "s-triage") (name . "Triage") (type . "triage") (position . 0))
     ((id . "s-backlog") (name . "Backlog") (type . "backlog") (position . 0))
@@ -112,6 +138,7 @@ A name means its next call; (NAME COUNT) means its COUNTth call from now.")
     (state . ,(org-linear-test--state state)) (team . ((id . "t1")))
     (assignee . ,(org-linear-test--user assignee))
     (project . ,(and project `((id . ,project))))
+    (parent . ,nil) (projectMilestone . ,nil)
     (labels . ((nodes . ,(mapcar (lambda (id) (seq-find (lambda (l) (equal (alist-get 'id l) id))
                                                         org-linear-test--labels))
                                  labels))))
@@ -125,7 +152,13 @@ A name means its next call; (NAME COUNT) means its COUNTth call from now.")
         org-linear-test--clock 0
         org-linear-test--refuse-next nil
         org-linear-test--lose-next nil
-        org-linear-test--fail-next nil)
+        org-linear-test--fail-next nil
+        org-linear-test--projects (make-hash-table :test #'equal)
+        org-linear-test--initiatives (make-hash-table :test #'equal)
+        org-linear-test--milestones (make-hash-table :test #'equal)
+        org-linear-test--links nil
+        org-linear-test--parents nil
+        org-linear-test--initiatives-disabled nil)
   (let ((today (format-time-string "%FT10:00:00Z" nil t)))
     (dolist (issue
              (list
@@ -276,7 +309,154 @@ A string is an error message."
                     (team . nil))))
        (setq org-linear-test--labels (append org-linear-test--labels (list label)))
        `((issueLabelCreate . ((success . t) (issueLabel . ,label))))))
-    (_ (format "unknown operation %s" name))))
+    (_ (or (org-linear-test--answer-object name variables)
+           (format "unknown operation %s" name)))))
+
+(defun org-linear-test--answer-object (name variables)
+  "Return the fake Linear's answer to the object operation NAME with VARIABLES.
+A string is an error message; nil means NAME is no object operation."
+  (let ((input (alist-get 'input variables))
+        (id (alist-get 'id variables)))
+    (pcase name
+      ("OrgLinearObjects"
+       (let ((ids (append (alist-get 'ids variables) nil)))
+         `((organization . ((roadmapEnabled . ,(if org-linear-test--initiatives-disabled :false t))))
+           (projectStatuses . ((nodes . ,org-linear-test--project-statuses)))
+           (projects . ((nodes . ,(org-linear-test--select
+                                   org-linear-test--projects ids #'org-linear-test--project-node))))
+           (initiatives . ((nodes . ,(org-linear-test--select
+                                      org-linear-test--initiatives ids
+                                      #'org-linear-test--initiative-node))))
+           (projectMilestones . ((nodes . ,(org-linear-test--select
+                                            org-linear-test--milestones ids
+                                            (lambda (id) (gethash id org-linear-test--milestones)))))))))
+      ("OrgLinearProjectCreate"
+       (org-linear-test--put-object org-linear-test--projects (alist-get 'id input)
+                                    `((trashed . :false) (status . ,(org-linear-test--project-status "ps-backlog"))
+                                      (url . "https://linear.app/x/project/new"))
+                                    input)
+       `((projectCreate . ((success . t) (project . ,(org-linear-test--project-node
+                                                     (alist-get 'id input)))))))
+      ("OrgLinearProjectUpdate"
+       (org-linear-test--put-object org-linear-test--projects id nil input)
+       `((projectUpdate . ((success . t) (project . ,(org-linear-test--project-node id))))))
+      ("OrgLinearProjectEdited" `((project . ,(org-linear-test--edited org-linear-test--projects id))))
+      ("OrgLinearProjectArchive"
+       (org-linear-test--put-object org-linear-test--projects id '((trashed . t)) nil)
+       '((projectDelete . ((success . t)))))
+      ("OrgLinearInitiativeCreate"
+       (if org-linear-test--initiatives-disabled
+           "Initiatives are disabled for this workspace."
+         (org-linear-test--put-object org-linear-test--initiatives (alist-get 'id input)
+                                      '((trashed . :false) (status . "Planned")
+                                        (url . "https://linear.app/x/initiative/new"))
+                                      input)
+         `((initiativeCreate . ((success . t) (initiative . ,(org-linear-test--initiative-node
+                                                              (alist-get 'id input))))))))
+      ("OrgLinearInitiativeUpdate"
+       (org-linear-test--put-object org-linear-test--initiatives id nil input)
+       `((initiativeUpdate . ((success . t) (initiative . ,(org-linear-test--initiative-node id))))))
+      ("OrgLinearInitiativeEdited"
+       `((initiative . ,(org-linear-test--edited org-linear-test--initiatives id))))
+      ("OrgLinearInitiativeArchive"
+       (org-linear-test--put-object org-linear-test--initiatives id '((archived . t)) nil)
+       '((initiativeArchive . ((success . t)))))
+      ("OrgLinearMilestoneCreate"
+       (if (not (gethash (alist-get 'projectId input) org-linear-test--projects))
+           "Entity not found: Project"
+         (org-linear-test--put-object org-linear-test--milestones (alist-get 'id input) nil input)
+         `((projectMilestoneCreate . ((success . t) (projectMilestone . ,(gethash (alist-get 'id input)
+                                                                                   org-linear-test--milestones)))))))
+      ("OrgLinearMilestoneUpdate"
+       (org-linear-test--put-object org-linear-test--milestones id nil input)
+       `((projectMilestoneUpdate . ((success . t) (projectMilestone . ,(gethash id org-linear-test--milestones))))))
+      ("OrgLinearMilestoneEdited"
+       `((projectMilestone . ,(org-linear-test--edited org-linear-test--milestones id))))
+      ("OrgLinearMilestoneArchive"
+       (remhash id org-linear-test--milestones)
+       (dolist (issue (hash-table-values org-linear-test--issues))
+         (when (equal (alist-get 'id (alist-get 'projectMilestone issue)) id)
+           (setf (alist-get 'projectMilestone issue) nil)))
+       '((projectMilestoneDelete . ((success . t)))))
+      ("OrgLinearProjectLink"
+       (if (seq-find (lambda (link) (and (equal (nth 1 link) (alist-get 'projectId input))
+                                         (equal (nth 2 link) (alist-get 'initiativeId input))))
+                     org-linear-test--links)
+           "The project is already in this initiative"
+         (push (list (format "link-%d" (cl-incf org-linear-test--clock))
+                     (alist-get 'projectId input) (alist-get 'initiativeId input))
+               org-linear-test--links)
+         '((initiativeToProjectCreate . ((success . t))))))
+      ("OrgLinearProjectUnlink"
+       (setq org-linear-test--links (seq-remove (lambda (link) (equal (car link) id))
+                                                org-linear-test--links))
+       '((initiativeToProjectDelete . ((success . t)))))
+      ("OrgLinearInitiativeParent"
+       (let ((child (alist-get 'relatedInitiativeId input)))
+         (setq org-linear-test--parents (seq-remove (lambda (r) (equal (nth 2 r) child))
+                                                    org-linear-test--parents))
+         (push (list (format "rel-%d" (cl-incf org-linear-test--clock))
+                     (alist-get 'initiativeId input) child)
+               org-linear-test--parents)
+         '((initiativeRelationCreate . ((success . t))))))
+      ("OrgLinearInitiativeRelations"
+       `((initiativeRelations
+          . ((nodes . ,(mapcar (lambda (r) `((id . ,(nth 0 r)) (initiative . ((id . ,(nth 1 r))))
+                                              (relatedInitiative . ((id . ,(nth 2 r))))))
+                               org-linear-test--parents))))))
+      ("OrgLinearInitiativeUnparent"
+       (setq org-linear-test--parents (seq-remove (lambda (r) (equal (car r) id))
+                                                  org-linear-test--parents))
+       '((initiativeRelationDelete . ((success . t))))))))
+
+(defun org-linear-test--select (table ids shape)
+  "Return the values of TABLE whose keys are among IDS, through SHAPE."
+  (delq nil (mapcar (lambda (id) (when (gethash id table) (funcall shape id))) ids)))
+
+(defun org-linear-test--project-status (id)
+  "Return the fake project status with ID."
+  (seq-find (lambda (s) (equal (alist-get 'id s) id)) org-linear-test--project-statuses))
+
+(defun org-linear-test--put-object (table id defaults input)
+  "Store in TABLE the object ID with DEFAULTS and then INPUT applied, as an edit."
+  (let ((object (or (copy-alist (gethash id table)) `((id . ,id)))))
+    (pcase-dolist (`(,key . ,value) (append defaults input))
+      (let ((value (if (eq value :null) nil value)))
+        (pcase key
+          ('teamIds nil)
+          ('statusId (setf (alist-get 'status object) (org-linear-test--project-status value)))
+          ('projectId (setf (alist-get 'project object) `((id . ,value))))
+          ((or 'content 'description)
+           (setf (alist-get key object)
+                 (if (and value org-linear-test--rewrite-descriptions)
+                     (org-linear-test--linear-markdown value)
+                   value)))
+          (_ (setf (alist-get key object) value)))))
+    (setf (alist-get 'updatedAt object) (org-linear-test--tick))
+    (puthash id object table)))
+
+(defun org-linear-test--edited (table id)
+  "Return the last edit of object ID of TABLE, as the edit check reads it."
+  `((updatedAt . ,(if org-linear-test--refuse-next
+                      (progn (setq org-linear-test--refuse-next nil) "changed")
+                    (alist-get 'updatedAt (gethash id table))))))
+
+(defun org-linear-test--project-node (id)
+  "Return the fake project ID with its links to initiatives."
+  (append (gethash id org-linear-test--projects)
+          `((initiativeToProjects
+             . ((nodes . ,(mapcar (lambda (link) `((id . ,(nth 0 link))
+                                                   (initiative . ((id . ,(nth 2 link))))))
+                                  (seq-filter (lambda (link) (equal (nth 1 link) id))
+                                              org-linear-test--links))))))))
+
+(defun org-linear-test--initiative-node (id)
+  "Return the fake initiative ID with its parent."
+  (append (gethash id org-linear-test--initiatives)
+          `((parentInitiative
+             . ,(when-let* ((relation (seq-find (lambda (r) (equal (nth 2 r) id))
+                                                org-linear-test--parents)))
+                  `((id . ,(nth 1 relation))))))))
 
 (defun org-linear-test--apply-input (id input)
   "Apply the issue INPUT to fake issue ID."
@@ -295,6 +475,9 @@ A string is an error message."
           ('snoozedUntilAt (setf (alist-get 'snoozedUntilAt issue) value))
           ('assigneeId (setf (alist-get 'assignee issue) (org-linear-test--user value)))
           ('projectId (setf (alist-get 'project issue) (and value `((id . ,value)))))
+          ('parentId (setf (alist-get 'parent issue) (and value `((id . ,value)))))
+          ('projectMilestoneId (setf (alist-get 'projectMilestone issue)
+                                     (and value `((id . ,value)))))
           ('labelIds (setf (alist-get 'labels issue)
                            `((nodes . ,(mapcar (lambda (lid) (seq-find (lambda (l) (equal (alist-get 'id l) lid))
                                                                        org-linear-test--labels))
@@ -2505,6 +2688,462 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (dotimes (_ 4) (org-linear-test--sync))
       (should (= 6 (length (seq-filter (lambda (i) (string-match-p "\\`Task [0-9]" (alist-get 'title i)))
                                        (hash-table-values org-linear-test--issues))))))))
+
+;;;; In-place hierarchy
+
+(defmacro org-linear-test--with-hierarchy (files &rest body)
+  "Run BODY over notes FILES synced in place, with projects and milestones.
+PROJECT and MILESTONE are the keywords of project and milestone headings."
+  (declare (indent 1))
+  `(org-linear-test--with-notes ,files
+     (let ((org-linear-project-keywords '("PROJECT"))
+           (org-linear-milestone-keywords '("MILESTONE"))
+           (org-todo-keywords '((sequence "TODO(t)" "PROJECT(p)" "MILESTONE(m)" "WAITING(w)"
+                                          "|" "DONE(d)" "CANCELLED(c)"))))
+       ,@body)))
+
+(defconst org-linear-test--tree
+  "* PROJECT Big
+Big body.
+** TODO Own task
+** PROJECT Site
+DEADLINE: <2026-12-01 Tue>
+*** MILESTONE Launch
+**** TODO Write copy
+***** TODO Draft headline
+*** TODO Plain site task
+* PROJECT Area
+** PROJECT Garden
+*** TODO Water
+* PROJECT Empty
+* PROJECT Top
+** PROJECT Mid
+*** PROJECT Leaf
+**** TODO Leaf task
+* TODO Loose parent
+** TODO Loose child
+"
+  "A note file with every case of the hierarchy.")
+
+(defun org-linear-test--named (table title)
+  "Return the fake object of TABLE whose name is TITLE."
+  (seq-find (lambda (object) (equal (alist-get 'name object) title)) (hash-table-values table)))
+
+(defun org-linear-test--id-named (table title)
+  "Return the ID of the fake object of TABLE whose name is TITLE."
+  (alist-get 'id (org-linear-test--named table title)))
+
+(defun org-linear-test--initiatives-of (project-title)
+  "Return the IDs of the initiatives the fake project PROJECT-TITLE is in."
+  (let ((id (org-linear-test--id-named org-linear-test--projects project-title)))
+    (mapcar (lambda (link) (nth 2 link))
+            (seq-filter (lambda (link) (equal (nth 1 link) id)) org-linear-test--links))))
+
+(defun org-linear-test--parent-of (initiative-title)
+  "Return the ID of the parent of the fake initiative INITIATIVE-TITLE."
+  (let ((id (org-linear-test--id-named org-linear-test--initiatives initiative-title)))
+    (nth 1 (seq-find (lambda (r) (equal (nth 2 r) id)) org-linear-test--parents))))
+
+(defun org-linear-test--relation (title key)
+  "Return the ID that the fake issue TITLE's relation KEY points to."
+  (alist-get 'id (alist-get key (org-linear-test--issue-titled title))))
+
+(defun org-linear-test--property-of (name title property)
+  "Return PROPERTY of the heading TITLE in note file NAME."
+  (with-temp-buffer
+    (insert-file-contents (expand-file-name name org-linear-test--notes))
+    (org-mode)
+    (goto-char (point-min))
+    (re-search-forward (format "^\\*+ .*%s$" (regexp-quote title)))
+    (org-entry-get nil property)))
+
+(defun org-linear-test--edit-note (name edit)
+  "Rewrite note file NAME by calling EDIT at the start of an Org buffer of its text."
+  (declare (indent 1))
+  (org-linear-test--write-note
+   name (let ((kill-ring nil)
+              (kill-ring-yank-pointer nil))
+          (with-temp-buffer
+            (insert (org-linear-test--note name))
+            (org-mode)
+            (goto-char (point-min))
+            (funcall edit)
+            (buffer-string)))))
+
+(defun org-linear-test--sync-until-quiet ()
+  "Sync until a sync creates nothing, at most five times."
+  (let ((n 0))
+    (while (progn (org-linear-test--sync)
+                  (cl-incf n)
+                  (and (< n 5)
+                       (seq-some (lambda (call) (string-match-p "Create\\'" (car call)))
+                                 (org-linear-test--calls)))))))
+
+(defun org-linear-test--hierarchy-writes ()
+  "Return the names of the write operations of the last sync, objects included."
+  (seq-filter (lambda (name) (string-match-p "Create\\|Update\\|Link\\|Unlink\\|Parent\\|Archive\\|Comment" name))
+              (mapcar #'car (org-linear-test--calls))))
+
+(ert-deftest org-linear-test-hierarchy-off-by-default ()
+  "With both options nil, nesting is not synced and no object is fetched."
+  (org-linear-test--with-notes '(("work.org" . "* TODO Parent\n** TODO Child\n"))
+    (let ((org-linear-exclude-keywords '("PROJECT")))
+      (should-not org-linear-project-keywords)
+      (should-not org-linear-milestone-keywords)
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearObjects"))
+      (should-not (org-linear-test--relation "Child" 'parent))
+      (should-not (seq-some (lambda (call) (assq 'parentId (alist-get 'input (cdr call))))
+                            (org-linear-test--calls "OrgLinearCreate"))))))
+
+(ert-deftest org-linear-test-hierarchy-maps-every-case ()
+  "Tasks, subtasks, projects, initiatives and milestones map as the manual says."
+  (org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-test--tree))
+    (org-linear-test--sync-until-quiet)
+    (let ((projects org-linear-test--projects)
+          (initiatives org-linear-test--initiatives)
+          (milestones org-linear-test--milestones))
+      ;; Project headings are never issues.
+      (dolist (title '("Big" "Site" "Area" "Garden" "Empty" "Top" "Mid" "Leaf" "Launch"))
+        (should-not (org-linear-test--issue-titled title)))
+      ;; 1. A task under a task is its sub-issue.
+      (should (equal (org-linear-test--relation "Loose child" 'parent)
+                     (alist-get 'id (org-linear-test--issue-titled "Loose parent"))))
+      (should (equal (org-linear-test--relation "Draft headline" 'parent)
+                     (alist-get 'id (org-linear-test--issue-titled "Write copy"))))
+      (should-not (org-linear-test--relation "Write copy" 'parent))
+      ;; 2. A project holding tasks or milestones is a Linear project; so is an empty one.
+      (dolist (title '("Site" "Garden" "Leaf" "Empty"))
+        (should (org-linear-test--named projects title))
+        (should-not (org-linear-test--named initiatives title)))
+      ;; 3. A project holding only projects is an initiative, nested under its parent's.
+      (dolist (title '("Area" "Top" "Mid"))
+        (should (org-linear-test--named initiatives title))
+        (should-not (org-linear-test--named projects title)))
+      (should (equal (org-linear-test--parent-of "Mid") (org-linear-test--id-named initiatives "Top")))
+      (should-not (org-linear-test--parent-of "Top"))
+      ;; 4. A project holding both is an initiative and a project.
+      (should (org-linear-test--named initiatives "Big"))
+      (should (org-linear-test--named projects "Big"))
+      ;; 5. A project is in the initiative of the project heading above, or its own.
+      (should (equal (org-linear-test--initiatives-of "Big") (list (org-linear-test--id-named initiatives "Big"))))
+      (should (equal (org-linear-test--initiatives-of "Site") (list (org-linear-test--id-named initiatives "Big"))))
+      (should (equal (org-linear-test--initiatives-of "Garden") (list (org-linear-test--id-named initiatives "Area"))))
+      (should (equal (org-linear-test--initiatives-of "Leaf") (list (org-linear-test--id-named initiatives "Mid"))))
+      (should-not (org-linear-test--initiatives-of "Empty"))
+      ;; 6. A milestone belongs to the project above; the issues below it are assigned to it.
+      (let ((launch (org-linear-test--named milestones "Launch")))
+        (should (equal (alist-get 'id (alist-get 'project launch)) (org-linear-test--id-named projects "Site")))
+        (should (equal (org-linear-test--relation "Write copy" 'projectMilestone) (alist-get 'id launch)))
+        (should (equal (org-linear-test--relation "Draft headline" 'projectMilestone) (alist-get 'id launch))))
+      (should-not (org-linear-test--relation "Plain site task" 'projectMilestone))
+      ;; 7. An issue's project is that of the nearest project heading above.
+      (should (equal (org-linear-test--relation "Own task" 'project) (org-linear-test--id-named projects "Big")))
+      (dolist (title '("Write copy" "Draft headline" "Plain site task"))
+        (should (equal (org-linear-test--relation title 'project) (org-linear-test--id-named projects "Site"))))
+      (should (equal (org-linear-test--relation "Water" 'project) (org-linear-test--id-named projects "Garden")))
+      (should (equal (org-linear-test--relation "Leaf task" 'project) (org-linear-test--id-named projects "Leaf")))
+      (should-not (org-linear-test--relation "Loose parent" 'project))
+      ;; Fields: body, deadline, open status.
+      (should (equal (alist-get 'content (org-linear-test--named projects "Big")) "Big body."))
+      (should (equal (alist-get 'content (org-linear-test--named initiatives "Big")) "Big body."))
+      (should (equal (alist-get 'targetDate (org-linear-test--named projects "Site")) "2026-12-01"))
+      (should (equal (alist-get 'type (alist-get 'status (org-linear-test--named projects "Site"))) "started"))
+      (should (equal (alist-get 'status (org-linear-test--named initiatives "Area")) "Active"))
+      ;; IDs live in the headings' properties, and no creation is left pending.
+      (should (equal (org-linear-test--property-of "plan.org" "Big" "LINEAR_PROJECT")
+                     (org-linear-test--id-named projects "Big")))
+      (should (equal (org-linear-test--property-of "plan.org" "Big" "LINEAR_INITIATIVE")
+                     (org-linear-test--id-named initiatives "Big")))
+      (should (equal (org-linear-test--property-of "plan.org" "Launch" "LINEAR_MILESTONE")
+                     (org-linear-test--id-named milestones "Launch")))
+      (should-not (org-linear-test--property-of "plan.org" "Area" "LINEAR_PROJECT"))
+      (should-not (string-match-p "PENDING" (org-linear-test--note "plan.org")))
+      ;; An issue created in Linear in a project keeps it in the inbox.
+      (should (equal (org-linear-test--relation "Task one" 'project) "p-a")))))
+
+(ert-deftest org-linear-test-hierarchy-second-sync-quiet ()
+  "Syncs after the hierarchy is in Linear send nothing and change no file."
+  (org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-test--tree))
+    (org-linear-test--sync-until-quiet)
+    (let ((plan (org-linear-test--note "plan.org"))
+          (inbox (org-linear-test--note "inbox.org")))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes))
+      (should (equal plan (org-linear-test--note "plan.org")))
+      (should (equal inbox (org-linear-test--note "inbox.org"))))))
+
+(ert-deftest org-linear-test-hierarchy-refiling-moves-relations ()
+  "Moving headings sends their new relations at the next sync; identity stays."
+  (org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-test--tree))
+    (org-linear-test--sync-until-quiet)
+    (let ((draft (alist-get 'id (org-linear-test--issue-titled "Draft headline")))
+          (garden (org-linear-test--id-named org-linear-test--projects "Garden"))
+          (count (hash-table-count org-linear-test--issues)))
+      ;; The subtask moves under the other task; the Garden project under Big.
+      (org-linear-test--edit-note "plan.org"
+        (lambda ()
+          (re-search-forward "^\\*+ TODO Draft headline")
+          (org-cut-subtree)
+          (re-search-forward "^\\*+ TODO Plain site task")
+          (org-end-of-subtree t t)
+          (org-paste-subtree 4)
+          (goto-char (point-min))
+          (re-search-forward "^\\*+ PROJECT Garden")
+          (org-cut-subtree)
+          (goto-char (point-min))
+          (re-search-forward "^\\* PROJECT Big")
+          (org-end-of-subtree t t)
+          (org-paste-subtree 2)
+          (goto-char (point-min))
+          (re-search-forward "^\\*+ MILESTONE Launch")
+          (org-cut-subtree)
+          (re-search-forward "^\\*+ PROJECT Garden")
+          (org-end-of-subtree t t)
+          (org-paste-subtree 3)))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'id (org-linear-test--issue-titled "Draft headline")) draft))
+      (should (equal (org-linear-test--relation "Draft headline" 'parent)
+                     (alist-get 'id (org-linear-test--issue-titled "Plain site task"))))
+      (should-not (org-linear-test--relation "Draft headline" 'projectMilestone))
+      (should (equal (org-linear-test--relation "Draft headline" 'project)
+                     (org-linear-test--id-named org-linear-test--projects "Site")))
+      (should (equal (org-linear-test--id-named org-linear-test--projects "Garden") garden))
+      (should (equal (alist-get 'id (alist-get 'project (org-linear-test--named org-linear-test--milestones "Launch")))
+                     garden))
+      (should (equal (org-linear-test--relation "Write copy" 'project) garden))
+      (should (equal (org-linear-test--relation "Write copy" 'projectMilestone)
+                     (org-linear-test--id-named org-linear-test--milestones "Launch")))
+      (should (equal (org-linear-test--initiatives-of "Garden")
+                     (list (org-linear-test--id-named org-linear-test--initiatives "Big"))))
+      (should (= count (hash-table-count org-linear-test--issues)))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes)))))
+
+(ert-deftest org-linear-test-hierarchy-fields-both-ways ()
+  "Titles, bodies, deadlines and statuses of objects sync both ways."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Site\nAbout the site.\n** MILESTONE Launch\n*** TODO Copy\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((site (org-linear-test--id-named org-linear-test--projects "Site"))
+          (launch (org-linear-test--id-named org-linear-test--milestones "Launch")))
+      ;; Linear to Org.
+      (org-linear-test--put-object org-linear-test--projects site nil
+                                   '((name . "Website") (targetDate . "2026-12-24")
+                                     (content . "About the **site**.")))
+      (org-linear-test--put-object org-linear-test--milestones launch nil '((name . "Go live")))
+      (org-linear-test--sync)
+      (let ((text (org-linear-test--note "plan.org")))
+        (should (string-match-p "^\\* PROJECT Website\nDEADLINE: <2026-12-24" text))
+        (should (string-match-p "About the \\*site\\*\\." text))
+        (should (string-match-p "^\\*\\* MILESTONE Go live" text)))
+      (org-linear-test--put-object org-linear-test--projects site nil '((statusId . "ps-done")))
+      (org-linear-test--sync)
+      (should (string-match-p "^\\* DONE Website" (org-linear-test--note "plan.org")))
+      ;; Org to Linear.
+      (org-linear-test--write-note
+       "plan.org" (replace-regexp-in-string "^\\* DONE Website" "* CANCELLED Website"
+                                            (org-linear-test--note "plan.org")))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'type (alist-get 'status (gethash site org-linear-test--projects)))
+                     "canceled"))
+      (org-linear-test--write-note
+       "plan.org" (replace-regexp-in-string "Go live" "Ship it" (org-linear-test--note "plan.org")))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'name (gethash launch org-linear-test--milestones)) "Ship it"))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes)))))
+
+(ert-deftest org-linear-test-hierarchy-conflict ()
+  "When both sides rename a project, the conflict winner's title stays."
+  (org-linear-test--with-hierarchy '(("plan.org" . "* PROJECT Site\n** TODO Copy\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((site (org-linear-test--id-named org-linear-test--projects "Site")))
+      (org-linear-test--put-object org-linear-test--projects site nil '((name . "Linear name")))
+      (org-linear-test--write-note
+       "plan.org" (replace-regexp-in-string "PROJECT Site" "PROJECT Org name"
+                                            (org-linear-test--note "plan.org") t))
+      (org-linear-test--sync)
+      (should (string-match-p "PROJECT Org name" (org-linear-test--note "plan.org")))
+      (should (equal (alist-get 'name (gethash site org-linear-test--projects)) "Org name"))
+      (should (string-match-p "Conflict in project \"Org name\" title: kept yours" (org-linear-test--log))))))
+
+(ert-deftest org-linear-test-hierarchy-linear-move-kept ()
+  "An issue moved to another project in Linear stays there until its heading moves."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Site\n** TODO Copy\n* PROJECT Shop\n** TODO Price\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((copy (alist-get 'id (org-linear-test--issue-titled "Copy")))
+          (shop (org-linear-test--id-named org-linear-test--projects "Shop")))
+      (org-linear-test--edit copy 'project `((id . ,shop)))
+      (org-linear-test--sync)
+      (should (equal (org-linear-test--relation "Copy" 'project) shop))
+      (should (string-match-p "Kept Linear's project of" (org-linear-test--log)))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes)))))
+
+(ert-deftest org-linear-test-hierarchy-create-limit ()
+  "Objects count toward the create limit, before issues; later syncs finish."
+  (org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-test--tree))
+    (let ((org-linear-create-limit 3))
+      (org-linear-test--sync)
+      (should (= 3 (+ (length (org-linear-test--calls "OrgLinearProjectCreate"))
+                      (length (org-linear-test--calls "OrgLinearInitiativeCreate"))
+                      (length (org-linear-test--calls "OrgLinearMilestoneCreate"))
+                      (length (org-linear-test--calls "OrgLinearCreate")))))
+      (dotimes (_ 8) (org-linear-test--sync))
+      (should (= 5 (hash-table-count org-linear-test--projects)))
+      (should (= 4 (hash-table-count org-linear-test--initiatives)))
+      (should (= 1 (hash-table-count org-linear-test--milestones)))
+      (should (equal (org-linear-test--relation "Draft headline" 'parent)
+                     (alist-get 'id (org-linear-test--issue-titled "Write copy"))))
+      (should (equal (org-linear-test--initiatives-of "Site")
+                     (list (org-linear-test--id-named org-linear-test--initiatives "Big"))))
+      (should-not (string-match-p "PENDING" (org-linear-test--note "plan.org"))))))
+
+(ert-deftest org-linear-test-hierarchy-vanished-archived ()
+  "A deleted project heading archives its issues and project and deletes its milestone."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Site\n** MILESTONE Launch\n*** TODO Copy\n* PROJECT Shop\n** TODO Price\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((site (org-linear-test--id-named org-linear-test--projects "Site"))
+          (copy (alist-get 'id (org-linear-test--issue-titled "Copy"))))
+      (org-linear-test--edit-note "plan.org"
+        (lambda () (re-search-forward "^\\* PROJECT Site") (org-cut-subtree)))
+      (org-linear-test--sync)
+      (should (alist-get 'archived (gethash copy org-linear-test--issues)))
+      (should (eq t (alist-get 'trashed (gethash site org-linear-test--projects))))
+      (should-not (org-linear-test--named org-linear-test--milestones "Launch"))
+      (should-not (eq t (alist-get 'trashed (org-linear-test--named org-linear-test--projects "Shop"))))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes)))))
+
+(ert-deftest org-linear-test-hierarchy-mass-vanishing-archives-nothing ()
+  "More vanished issues and objects than `org-linear-archive-limit' archive none."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Site\n** MILESTONE Launch\n*** TODO Copy\n*** TODO Edit\n** TODO Plan\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((org-linear-archive-limit 4))
+      (org-linear-test--write-note "plan.org" "")
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes))
+      (should (string-match-p "3 issues and 2 projects, initiatives or milestones are gone"
+                              (org-linear-test--log))))))
+
+(ert-deftest org-linear-test-hierarchy-deleted-in-linear ()
+  "A project deleted in Linear cancels its heading, which keeps its text and is not recreated."
+  (org-linear-test--with-hierarchy '(("plan.org" . "* PROJECT Site\nNotes.\n** TODO Copy\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((site (org-linear-test--id-named org-linear-test--projects "Site")))
+      (org-linear-test--put-object org-linear-test--projects site nil '((trashed . t)))
+      (org-linear-test--sync)
+      (let ((text (org-linear-test--note "plan.org")))
+        (should (string-match-p "^\\* CANCELLED Site\n" text))
+        (should (string-match-p "Notes\\." text))
+        (should-not (string-match-p (regexp-quote site) text)))
+      (org-linear-test--sync)
+      (org-linear-test--sync)
+      (should (= 1 (hash-table-count org-linear-test--projects))))))
+
+(ert-deftest org-linear-test-hierarchy-lost-create-not-repeated ()
+  "A project whose creation answer was lost is linked by the next sync, not made twice."
+  (org-linear-test--with-hierarchy '(("plan.org" . "* PROJECT Site\n** TODO Copy\n"))
+    (setq org-linear-test--lose-next "OrgLinearProjectCreate")
+    (org-linear-sync)
+    (let ((deadline (+ (float-time) 30)))
+      (while (and org-linear--busy (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (string-match-p "LINEAR_PENDING_PROJECT" (org-linear-test--note "plan.org")))
+    (org-linear-test--sync-until-quiet)
+    (should (= 1 (hash-table-count org-linear-test--projects)))
+    (should (org-linear-test--property-of "plan.org" "Site" "LINEAR_PROJECT"))
+    (should-not (string-match-p "PENDING" (org-linear-test--note "plan.org")))
+    (should (equal (org-linear-test--relation "Copy" 'project)
+                   (org-linear-test--id-named org-linear-test--projects "Site")))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))))
+
+(ert-deftest org-linear-test-hierarchy-without-initiatives ()
+  "Where Linear refuses initiatives, projects still sync and the refusal is not retried."
+  (org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-test--tree))
+    (setq org-linear-test--initiatives-disabled t)
+    (org-linear-test--sync-until-quiet)
+    (should-not (org-linear-test--calls-ever "OrgLinearInitiativeCreate"))
+    (dolist (title '("Big" "Site" "Garden" "Leaf" "Empty"))
+      (should (org-linear-test--named org-linear-test--projects title)))
+    (should-not (org-linear-test--initiatives-of "Site"))
+    (should (equal (org-linear-test--relation "Own task" 'project)
+                   (org-linear-test--id-named org-linear-test--projects "Big")))
+    (should (string-match-p "Not created: 4 initiatives, since initiatives are turned off"
+                            (org-linear-test--log)))
+    (should-not (string-match-p "INITIATIVE" (org-linear-test--note "plan.org")))
+    ;; The file is not marked to be read again for the initiatives.
+    (org-linear-test--sync)
+    (should-not (org-linear-test--hierarchy-writes))
+    (should-not (plist-get (gethash (expand-file-name "plan.org" org-linear-test--notes)
+                                    (plist-get org-linear--state :files))
+                           :new))
+    ;; Once initiatives are turned on, they are created and the projects join them.
+    (setq org-linear-test--initiatives-disabled nil)
+    (org-linear-test--write-note "plan.org" (concat (org-linear-test--note "plan.org") "* TODO Nudge\n"))
+    (org-linear-test--sync-until-quiet)
+    (should (= 4 (hash-table-count org-linear-test--initiatives)))
+    (should (equal (org-linear-test--initiatives-of "Site")
+                   (list (org-linear-test--id-named org-linear-test--initiatives "Big"))))
+    (should (equal (org-linear-test--parent-of "Mid")
+                   (org-linear-test--id-named org-linear-test--initiatives "Top")))))
+
+(ert-deftest org-linear-test-hierarchy-vanished-initiative-archived ()
+  "A deleted initiative heading archives the initiative, its project and its issue."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Area\n** PROJECT Garden\n*** TODO Water\n* TODO Keep\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((area (org-linear-test--id-named org-linear-test--initiatives "Area"))
+          (garden (org-linear-test--id-named org-linear-test--projects "Garden"))
+          (water (alist-get 'id (org-linear-test--issue-titled "Water"))))
+      (org-linear-test--edit-note "plan.org"
+        (lambda () (re-search-forward "^\\* PROJECT Area") (org-cut-subtree)))
+      (org-linear-test--sync)
+      (should (alist-get 'archived (gethash water org-linear-test--issues)))
+      (should (eq t (alist-get 'trashed (gethash garden org-linear-test--projects))))
+      (should (eq t (alist-get 'archived (gethash area org-linear-test--initiatives))))
+      (should-not (alist-get 'archived (org-linear-test--issue-titled "Keep"))))))
+
+(ert-deftest org-linear-test-hierarchy-linear-rewrite-is-not-an-edit ()
+  "Linear's rewrite of a project's description changes no heading."
+  (let ((org-linear-test--rewrite-descriptions t))
+    (org-linear-test--with-hierarchy
+        '(("plan.org" . "* PROJECT Site\nSee https://example.org/a\n- one  \n- two\n** TODO Copy\n"))
+      (org-linear-test--sync-until-quiet)
+      (should (string-match-p "(<https://example.org/a>)"
+                              (alist-get 'content (org-linear-test--named org-linear-test--projects "Site"))))
+      (let ((text (org-linear-test--note "plan.org")))
+        (org-linear-test--sync)
+        (org-linear-test--sync)
+        (should-not (org-linear-test--hierarchy-writes))
+        (should (equal text (org-linear-test--note "plan.org")))))))
+
+(ert-deftest org-linear-test-hierarchy-preview ()
+  "The preview lists the projects, initiatives and milestones to create."
+  (org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-test--tree))
+    (setq org-linear-test--calls nil)
+    (save-window-excursion (org-linear-preview))
+    (should-not org-linear-test--calls)
+    (with-current-buffer "*org-linear preview*"
+      (should (string-match-p "New projects, initiatives and milestones to create: 10" (buffer-string)))
+      (should (string-match-p "  Big (initiative and project)" (buffer-string)))
+      (should (string-match-p "  Launch (milestone)" (buffer-string))))
+    (kill-buffer "*org-linear preview*")))
+
+(ert-deftest org-linear-test-hierarchy-older-state ()
+  "A state loaded before projects synced gets their table when they first do."
+  (org-linear-test--with-hierarchy '(("plan.org" . "* PROJECT Site\n** TODO Copy\n"))
+    (setq org-linear--state (list :tasks (make-hash-table :test #'equal)))
+    (org-linear-test--sync-until-quiet)
+    (should (org-linear-test--named org-linear-test--projects "Site"))
+    (should (hash-table-p (plist-get org-linear--state :objects)))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

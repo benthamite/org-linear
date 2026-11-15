@@ -2,7 +2,10 @@
 
 Status: implemented (in-place layout in `org-linear-in-place.el`, profiles in
 `org-linear.el`); first live import 2026-11-13. See "Discoveries" at the end
-for what changed from this plan.
+for what changed from this plan. Sub-issues, projects, initiatives and
+milestones, deferred below, were added on 2026-11-15 behind
+`org-linear-project-keywords` and `org-linear-milestone-keywords`; the manual
+describes them.
 
 ## Goal
 

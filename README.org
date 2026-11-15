@@ -396,6 +396,65 @@ A configuration might look like this:
 #+vindex: org-linear-conflict-winner
 #+vindex: org-linear-assign-new-issues
 
+** Projects, initiatives and milestones
+:PROPERTIES:
+:CUSTOM_ID: h:hierarchy
+:END:
+
+#+vindex: org-linear-project-keywords
+#+vindex: org-linear-milestone-keywords
+By default each TODO heading is an issue of its own, whatever headings it sits under. Set ~org-linear-project-keywords~ to the keywords of your project headings, such as ="PROJECT"=, and ~org-linear-milestone-keywords~ to those of your milestone headings, such as ="MILESTONE"=, and the nesting syncs too. Both are =nil= by default, which leaves the layout as described above. A heading with one of these keywords is never an issue. The keywords must be TODO keywords of your files, and must not be in ~org-linear-exclude-keywords~, which would leave their headings out.
+
+A /task/ here is any heading synced as an issue. The headings map to Linear as follows:
+
+- A task under another task is a sub-issue of the nearest task above it.
+- A project heading that holds tasks or milestones becomes a Linear project in the team. It holds them when no other project heading comes between, so a task under a task under it counts.
+- A project heading that holds only project headings becomes an initiative. Under another project heading, it becomes a sub-initiative of that heading's initiative.
+- A project heading that holds both becomes an initiative, and a Linear project for its own tasks and milestones, since Linear has nothing that is both.
+- A project heading that holds nothing becomes a Linear project.
+- A Linear project belongs to its own heading's initiative, if it has one, or else to that of the nearest project heading above it.
+- A milestone heading becomes a milestone of the Linear project of the nearest project heading above it. Without one, it is not synced, and the log says so.
+- An issue belongs to the Linear project of the nearest project heading above it, and to the milestone of the nearest milestone heading between it and that project heading.
+
+For example:
+
+#+begin_example
+,* PROJECT Website                 initiative and project
+,** TODO Pick a domain             issue in the project Website
+,** PROJECT Shop                   project in the initiative Website
+,*** MILESTONE Launch              milestone of Shop
+,**** TODO Write the copy          issue in Shop, milestone Launch
+,***** TODO Draft the headline     sub-issue of Write the copy, in Shop and Launch
+#+end_example
+
+Each heading keeps the IDs of its Linear objects in properties, as an issue's heading keeps =LINEAR_UUID=: =LINEAR_PROJECT= for a project, =LINEAR_INITIATIVE= for an initiative and =LINEAR_MILESTONE= for a milestone. A project heading that is both holds both IDs. The sync maintains them; do not edit them.
+
+A heading's title is its object's name, its body the description (a project's or initiative's overview), and its =DEADLINE= the target date. A project heading's keyword gives the status of its project and initiative: an open keyword makes a started project and an active initiative, a done keyword a completed one, and a done keyword sent as a canceled workflow state, by ~org-linear-keyword-states~ or ~org-linear-type-keywords~, a canceled one. A project that Linear moves to another open status, such as planned, keeps its heading's keyword. These fields merge both ways, as an issue's do, with ~org-linear-conflict-winner~ deciding when both sides changed. A milestone's keyword is not synced, since Linear works out a milestone's status itself.
+
+Identity stays with the heading's properties, so moving a heading keeps its objects and changes only its relations, which the next sync sends. Refile a task under another task and it becomes that task's sub-issue; refile a project heading under another one and its project joins that heading's initiative and leaves the one the sync had put it in. The nesting lives in Org: a relation changed in Linear, such as an issue moved there to another project, stays until you move the heading, and the log says so. A project heading keeps the objects it has when what it holds changes, and gets those it now needs.
+
+The safeguards for issues apply to these objects too:
+
+- A new project, initiative or milestone gets its ID as =LINEAR_PENDING_PROJECT=, =LINEAR_PENDING_INITIATIVE= or =LINEAR_PENDING_MILESTONE= before anything is sent, and its file is saved. New objects count toward ~org-linear-create-limit~, and come before the sync's new issues: first initiatives, then projects, then milestones.
+- A project or initiative whose heading is no longer in any file is archived in Linear, and a milestone deleted, on the same terms as issues. The vanished issues and objects of a sync count together toward ~org-linear-archive-limit~. Linear's only archive for a project is its trash, from which the project can be restored.
+- An object deleted in Linear cancels its heading, which keeps its text and loses the ID, so that the object is not created again.
+
+Initiatives must be turned on in Linear, under Settings, Initiatives. While they are off, the sync creates none and logs how many it left out; the projects are created all the same, and join their initiatives once those exist. Sub-initiatives need Linear's Enterprise plan: elsewhere Linear refuses to nest an initiative, and the sync logs the refusal and does not send it again until the heading moves.
+
+=M-x org-linear-preview= also lists the projects, initiatives and milestones the next sync would create.
+
+#+begin_src emacs-lisp
+(setq org-linear-profiles
+      '((personal :layout in-place
+                  :teams ("ME")
+                  :directories ("~/notes")
+                  :project-keywords ("PROJECT")
+                  :milestone-keywords ("MILESTONE")
+                  :conflict-winner org)))
+#+end_src
+
+Turning the options on makes the next sync read every file again and send the relations of the issues already linked, so expect that sync to be a large one.
+
 * Limits
 :PROPERTIES:
 :CUSTOM_ID: h:limits

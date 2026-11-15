@@ -264,7 +264,9 @@ changes.  No sync starts while the file has unsaved edits."
 (defvar org-linear--state nil
   "Sync state, a plist.
 :tasks is a hash table from issue ID to the issue as it was at the last
-sync; :rejected-adds lists new issues Linear refused to create; :me-tag,
+sync, and :objects one from the ID of a project, initiative or milestone
+of the in-place layout to its state; :rejected-adds lists new issues and
+objects Linear refused to create; :me-tag,
 :user-tags and :label-tags record the tags of the last sync, for the
 agenda.")
 
@@ -380,8 +382,28 @@ A large import spreads over several syncs, within Linear's rate limits."
 (defcustom org-linear-archive-limit 5
   "Most issues one in-place sync archives because their headings vanished.
 More than this, as when a directory leaves `org-linear-directories',
-archives none and logs why."
+archives none and logs why.  Projects, initiatives and milestones whose
+headings vanished count too."
   :type 'integer
+  :group 'org-linear)
+
+(defcustom org-linear-project-keywords nil
+  "TODO keywords of the headings the in-place layout syncs as projects.
+Such a heading is never an issue.  One that holds tasks or milestones,
+or nothing, becomes a Linear project in the team; one that holds other
+project headings becomes an initiative; one that holds both becomes
+both.  See the manual.  A keyword that is also in
+`org-linear-exclude-keywords' is left out."
+  :type '(repeat string)
+  :group 'org-linear)
+
+(defcustom org-linear-milestone-keywords nil
+  "TODO keywords of the headings the in-place layout syncs as milestones.
+Such a heading is never an issue.  It becomes a milestone of the Linear
+project of the nearest project heading above it, and the issues below
+it are assigned to it.  A keyword that is also in
+`org-linear-exclude-keywords' is left out."
+  :type '(repeat string)
   :group 'org-linear)
 
 ;;;; Profiles
@@ -583,6 +605,9 @@ sync runs in the profile in effect."
 (declare-function org-linear-in-place--run-archive "org-linear-in-place" (op next))
 (declare-function org-linear-in-place--link-created "org-linear-in-place" (place view md task))
 (declare-function org-linear-in-place--flush "org-linear-in-place" ())
+(declare-function org-linear-in-place--known-relations "org-linear-in-place" (op))
+(declare-function org-linear-in-place--sent-relations "org-linear-in-place" (base relations))
+(declare-function org-linear-in-place--run-object "org-linear-in-place" (op next))
 
 (defun org-linear--start ()
   "Save the file if needed, then fetch the issues."
@@ -1105,6 +1130,16 @@ project { id } labels(first: 50) { nodes { id name } }
 comments(first: 100) { nodes { id body createdAt parent { id } user { id name } } }"
   "The issue fields the sync reads.")
 
+(defconst org-linear--relation-fields "parent { id } projectMilestone { id }"
+  "The issue fields the in-place layout reads when it syncs a hierarchy.")
+
+(defun org-linear--issue-query-fields ()
+  "Return the issue fields the sync reads in the profile in effect."
+  (if (and (eq org-linear-layout 'in-place)
+           (or org-linear-project-keywords org-linear-milestone-keywords))
+      (concat org-linear--issue-fields "\n" org-linear--relation-fields)
+    org-linear--issue-fields))
+
 (defun org-linear--fetch (buffer callback)
   "Fetch the teams' metadata and issues, then call CALLBACK with them.
 Issues whose headings are in BUFFER but which fall outside the fetched
@@ -1143,7 +1178,7 @@ set are fetched too, so that their edits still sync."
    (format "query OrgLinearIssues($filter: IssueFilter, $after: String) {
   issues(first: 25, after: $after, filter: $filter, includeArchived: true) {
     pageInfo { hasNextPage endCursor } nodes { %s } } }"
-           org-linear--issue-fields)
+           (org-linear--issue-query-fields))
    `((filter . ,filter) (after . ,(or after :null)))
    (lambda (data)
      (let* ((page (alist-get 'issues data))
@@ -1236,6 +1271,8 @@ set are fetched too, so that their edits still sync."
       (priority . ,(alist-get 'priority issue))
       (due . ,(alist-get 'dueDate issue))
       (project_id . ,(alist-get 'id (alist-get 'project issue)))
+      (parent_id . ,(alist-get 'id (alist-get 'parent issue)))
+      (milestone_id . ,(alist-get 'id (alist-get 'projectMilestone issue)))
       (description . ,(or (alist-get 'description issue) ""))
       (trashed . ,(if (eq (alist-get 'trashed issue) t) t :false))
       (last_edited_time . ,(alist-get 'updatedAt issue)))))
@@ -1669,11 +1706,18 @@ BASE its state."
 
 (defun org-linear--op-signature (op)
   "Return a string that identifies the content of OP."
-  (format "%S" (pcase (plist-get op :type)
-                 ('update (list 'update (plist-get op :fields)))
-                 ('note (list 'note (plist-get op :key)))
-                 ('add (list 'add (plist-get op :view)))
-                 (type (list type)))))
+  (let ((relations (plist-get op :relations)))
+    (format "%S" (append
+                  (pcase (plist-get op :type)
+                    ('update (list 'update (plist-get op :fields)))
+                    ('note (list 'note (plist-get op :key)))
+                    ('add (list 'add (plist-get op :view)))
+                    ('object-add (list 'object-add (plist-get op :kind) (plist-get op :view)))
+                    ('object-update (list 'object-update (plist-get op :kind)
+                                          (plist-get op :fields)))
+                    ('object-relate (list 'object-relate (plist-get op :kind)))
+                    (type (list type)))
+                  (when relations (list relations))))))
 
 (defun org-linear--creation-ops (index)
   "Return edits that create a Linear issue for each new heading in INDEX."
@@ -1790,12 +1834,20 @@ The date itself arrives as a change from Linear.  MARKER is the heading."
     (org-linear--run-op (car ops) (lambda () (org-linear--run-ops (cdr ops))))))
 
 (defun org-linear--run-op (op next)
-  "Send OP to Linear, then call NEXT."
+  "Send OP to Linear, then call NEXT.
+An in-place edit that relates an issue to the objects of other headings
+sends only the relations whose objects Linear has by now, and one left
+with nothing to send is skipped."
+  (when (plist-get op :relations)
+    (setq op (org-linear-in-place--known-relations op)))
   (pcase (plist-get op :type)
+    ('nil (funcall next))
     ('update (org-linear--run-update op next))
     ('note (org-linear--run-note op next))
     ('add (org-linear--run-add op next))
-    ('archive (org-linear-in-place--run-archive op next))))
+    ('archive (org-linear-in-place--run-archive op next))
+    ((or 'object-add 'object-update 'object-relate 'object-archive)
+     (org-linear-in-place--run-object op next))))
 
 (defun org-linear--run-update (op next)
   "Send the field changes of OP, then call NEXT.
@@ -1823,6 +1875,9 @@ changed since the sync read it."
                  (let ((issue (alist-get 'issue (alist-get 'issueUpdate result))))
                    (dolist (field (plist-get op :fields))
                      (setq base (plist-put base (car field) (cdr field))))
+                   (when (plist-get op :relations)
+                     (setq base (org-linear-in-place--sent-relations
+                                 base (plist-get op :relations))))
                    (setq base (plist-put base :desc-md (or (alist-get 'description issue) "")))
                    (org-linear--after-write id base (alist-get 'updatedAt issue))
                    (funcall next)))
@@ -1844,6 +1899,7 @@ A field that cannot be sent is logged and left out."
     (dolist (field fields)
       (setq input (append input (org-linear--field-input (car field) (cdr field) team
                                                          (plist-get op :label-ids)))))
+    (setq input (append input (org-linear--relation-input (plist-get op :relations))))
     (setq input (org-linear--with-start-label input (plist-get op :label-ids) start
                                               (and start-field t) team))
     (when start-field
@@ -1879,6 +1935,18 @@ LABEL-IDS are the issue's labels now, for the tags."
     (:project `((projectId . ,(or value :null))))
     (:tags (org-linear--tags-input value team label-ids))
     ((or :body :scheduled) nil)))
+
+(defun org-linear--relation-input (relations &optional omit-nil)
+  "Return the issue input entries that set RELATIONS, a plist.
+Its keys are :parent, :project and :milestone; a nil value clears the
+relation, or is left out with OMIT-NIL."
+  (cl-loop for (key value) on relations by #'cddr
+           unless (and omit-nil (null value))
+           collect (cons (pcase key
+                           (:parent 'parentId)
+                           (:project 'projectId)
+                           (:milestone 'projectMilestoneId))
+                         (or value :null))))
 
 (defun org-linear--tags-input (tags team label-ids)
   "Return the assignee and label entries that TAGS stand for, in TEAM.
@@ -2007,11 +2075,12 @@ answer was lost is then found by the next sync instead of repeated."
                               (when (plist-get view :project)
                                 (org-linear--field-input :project (plist-get view :project) team))
                               (org-linear--tags-input (plist-get view :tags) team nil)
+                              (org-linear--relation-input (plist-get op :relations) t)
                               (org-linear--new-issue-assignee))
                       nil start (and start t) team)))
          (org-linear--graphql
           (format "mutation OrgLinearCreate($input: IssueCreateInput!) {
-  issueCreate(input: $input) { success issue { %s } } }" org-linear--issue-fields)
+  issueCreate(input: $input) { success issue { %s } } }" (org-linear--issue-query-fields))
           `((input . ,input))
           (lambda (data)
             (org-linear--finish-create
@@ -2137,9 +2206,10 @@ not sent again while later edits still go through."
   "Record that Linear rejected OP."
   (let ((signature (org-linear--op-signature op)))
     (if-let* ((id (plist-get op :id))
-              (base (gethash id (org-linear--state-tasks))))
+              (table (org-linear--table-of id))
+              (base (gethash id table)))
         (puthash id (plist-put base :rejected (cons signature (plist-get base :rejected)))
-                 (org-linear--state-tasks))
+                 table)
       (plist-put org-linear--state :rejected-adds
                  (cons signature (plist-get org-linear--state :rejected-adds))))))
 
@@ -2280,7 +2350,7 @@ otherwise, from the default value of `org-todo-keywords'."
                    start)
             :deadline (org-linear--planning-date "DEADLINE")
             :scheduled start
-            :project (org-linear--heading-project)
+            :project (unless (eq org-linear-layout 'in-place) (org-linear--heading-project))
             :body (org-linear--body)))))
 
 (defun org-linear--file-label-tags ()
@@ -2844,18 +2914,36 @@ Open issues do, and closed ones for `org-linear-closed-retention-days'."
   "Return the hash table of issue states."
   (plist-get org-linear--state :tasks))
 
+(defun org-linear--state-objects ()
+  "Return the hash table of the states of projects, initiatives and milestones.
+A state loaded before the table existed gets an empty one."
+  (or (plist-get org-linear--state :objects)
+      (when org-linear--state
+        (let ((table (make-hash-table :test #'equal)))
+          (setq org-linear--state (plist-put org-linear--state :objects table))
+          table))))
+
+(defun org-linear--table-of (id)
+  "Return the state table that holds ID, an issue's or another object's, or nil."
+  (seq-find (lambda (table) (and table (gethash id table)))
+            (list (org-linear--state-tasks) (org-linear--state-objects))))
+
 (defun org-linear--load-state ()
   "Load the sync state from `org-linear-state-file' unless loaded."
   (unless org-linear--state
     (let ((tasks (make-hash-table :test #'equal))
+          (objects (make-hash-table :test #'equal))
           (saved (when (file-exists-p org-linear-state-file)
                    (with-temp-buffer
                      (insert-file-contents org-linear-state-file)
                      (read (current-buffer))))))
       (dolist (entry (plist-get saved :tasks))
         (puthash (car entry) (cdr entry) tasks))
+      (dolist (entry (plist-get saved :objects))
+        (puthash (car entry) (cdr entry) objects))
       (setq org-linear--state
             (list :tasks tasks
+                  :objects objects
                   :rejected-adds (plist-get saved :rejected-adds)
                   :me-tag (plist-get saved :me-tag)
                   :user-tags (plist-get saved :user-tags)
@@ -2870,8 +2958,10 @@ Open issues do, and closed ones for `org-linear-closed-retention-days'."
 The state goes to a temporary file that then replaces the old one, so a
 write cut short leaves the previous state whole."
   (let ((dir (file-name-directory org-linear-state-file))
-        entries temp)
+        entries objects temp)
     (maphash (lambda (id base) (push (cons id base) entries)) (org-linear--state-tasks))
+    (when (org-linear--state-objects)
+      (maphash (lambda (id base) (push (cons id base) objects)) (org-linear--state-objects)))
     (make-directory dir t)
     (setq temp (make-temp-file (expand-file-name "state-" dir) nil ".tmp"))
     (unwind-protect
@@ -2887,6 +2977,7 @@ write cut short leaves the previous state whole."
                            :since (plist-get org-linear--state :since)
                            :scope-key (plist-get org-linear--state :scope-key)
                            :files (plist-get org-linear--state :files)
+                           :objects objects
                            :tasks entries)
                      (current-buffer))))
           (rename-file temp org-linear-state-file t))
