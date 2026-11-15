@@ -45,6 +45,24 @@ spaces go (observed on 2026-11-13).")
   "Name of an operation whose next answer is lost on the way back.
 The fake Linear still carries the operation out.")
 
+(defvar org-linear-test--fail-next nil
+  "An operation whose call fails before Linear acts on it.
+A name means its next call; (NAME COUNT) means its COUNTth call from now.")
+
+(defun org-linear-test--fail-now-p (name)
+  "Return non-nil if this call of the operation NAME is to fail."
+  (pcase org-linear-test--fail-next
+    ((pred stringp)
+     (when (equal name org-linear-test--fail-next)
+       (setq org-linear-test--fail-next nil)
+       t))
+    (`(,failing ,count)
+     (when (equal name failing)
+       (if (> count 1)
+           (progn (setq org-linear-test--fail-next (list failing (1- count))) nil)
+         (setq org-linear-test--fail-next nil)
+         t)))))
+
 (defconst org-linear-test--states
   '(((id . "s-triage") (name . "Triage") (type . "triage") (position . 0))
     ((id . "s-backlog") (name . "Backlog") (type . "backlog") (position . 0))
@@ -103,9 +121,11 @@ The fake Linear still carries the operation out.")
   "Fill the fake board with the issues the tests start from."
   (setq org-linear-test--issues (make-hash-table :test #'equal)
         org-linear-test--calls nil
+        org-linear-test--all-calls nil
         org-linear-test--clock 0
         org-linear-test--refuse-next nil
-        org-linear-test--lose-next nil)
+        org-linear-test--lose-next nil
+        org-linear-test--fail-next nil)
   (let ((today (format-time-string "%FT10:00:00Z" nil t)))
     (dolist (issue
              (list
@@ -146,8 +166,11 @@ Like Linear, refuse a nil variable, which `json-serialize' sends as {}."
   (org-linear-test--check-serializable variables)
   (let* ((name (and (string-match "\\(?:query\\|mutation\\) \\(OrgLinear[A-Za-z]+\\)" query)
                     (match-string 1 query)))
-         (answer (org-linear-test--answer name variables)))
+         (answer (if (org-linear-test--fail-now-p name)
+                     'lost
+                   (org-linear-test--answer name variables))))
     (push (cons name variables) org-linear-test--calls)
+    (push (cons name variables) org-linear-test--all-calls)
     (when (equal name org-linear-test--lose-next)
       (setq org-linear-test--lose-next nil
             answer 'lost))
@@ -232,14 +255,16 @@ A string is an error message."
                            (comment . ((id . ,(alist-get 'id comment))
                                        (issue . ((updatedAt . ,(alist-get 'updatedAt issue)))))))))))
     ("OrgLinearCreate"
-     (let* ((input (alist-get 'input variables))
-            (n (1+ (hash-table-count org-linear-test--issues)))
-            (id (or (alist-get 'id input) (format "i-new-%d" n)))
-            (issue (org-linear-test--issue id (format "ENG-%d" (+ 100 n)) (alist-get 'title input)
-                                           :project nil)))
-       (puthash id issue org-linear-test--issues)
-       (org-linear-test--apply-input id input)
-       `((issueCreate . ((success . t) (issue . ,(gethash id org-linear-test--issues)))))))
+     (if (string-match-p "REJECT" (alist-get 'title (alist-get 'input variables)))
+         "Argument Validation Error"
+       (let* ((input (alist-get 'input variables))
+              (n (1+ (hash-table-count org-linear-test--issues)))
+              (id (or (alist-get 'id input) (format "i-new-%d" n)))
+              (issue (org-linear-test--issue id (format "ENG-%d" (+ 100 n)) (alist-get 'title input)
+                                             :project nil)))
+         (puthash id issue org-linear-test--issues)
+         (org-linear-test--apply-input id input)
+         `((issueCreate . ((success . t) (issue . ,(gethash id org-linear-test--issues))))))))
     ("OrgLinearArchive"
      (let ((issue (gethash (alist-get 'id variables) org-linear-test--issues)))
        (setf (alist-get 'archived issue) t)
@@ -325,6 +350,13 @@ A string is an error message."
   "Return the operations of the last sync, oldest first, only NAME if given."
   (seq-filter (lambda (call) (or (null name) (equal (car call) name)))
               (reverse org-linear-test--calls)))
+
+(defvar org-linear-test--all-calls nil
+  "Every operation the fake Linear answered in the running test, newest first.")
+
+(defun org-linear-test--calls-ever (name)
+  "Return the operations named NAME the fake Linear answered in the running test."
+  (seq-filter (lambda (call) (equal (car call) name)) org-linear-test--all-calls))
 
 (defun org-linear-test--writes ()
   "Return the names of the write operations of the last sync."
@@ -2246,6 +2278,45 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
                                      (hash-table-values org-linear-test--issues)))))
     (should (org-linear-test--uuid-of "work.org" "Only once"))
     (should-not (string-match-p "LINEAR_PENDING_UUID" (org-linear-test--note "work.org")))))
+
+(ert-deftest org-linear-test-in-place-failed-create-sent-again ()
+  "A create that failed before Linear acted on it is sent again by the next sync."
+  (org-linear-test--with-notes '(("work.org" . "* TODO Only once\n"))
+    (setq org-linear-test--fail-next "OrgLinearCreate")
+    (org-linear-sync)
+    (let ((deadline (+ (float-time) 30)))
+      (while (and org-linear--busy (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should-not (org-linear-test--issue-titled "Only once"))
+    (should (string-match-p "LINEAR_PENDING_UUID" (org-linear-test--note "work.org")))
+    (org-linear-test--sync)
+    (should (org-linear-test--issue-titled "Only once"))
+    (should (org-linear-test--uuid-of "work.org" "Only once"))
+    (should-not (string-match-p "LINEAR_PENDING_UUID" (org-linear-test--note "work.org")))))
+
+(ert-deftest org-linear-test-in-place-failed-create-after-links-sent-again ()
+  "A create that failed after others in its file were linked is sent again."
+  (org-linear-test--with-notes '(("work.org" . "* TODO First\n* TODO Second\n"))
+    (setq org-linear-test--fail-next '("OrgLinearCreate" 2))
+    (org-linear-sync)
+    (let ((deadline (+ (float-time) 30)))
+      (while (and org-linear--busy (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (org-linear-test--issue-titled "First"))
+    (should-not (org-linear-test--issue-titled "Second"))
+    ;; As if the next sync came later than the overlap of the fetches.
+    (plist-put org-linear--state :since (format-time-string "%FT%TZ" (time-add nil 3600) t))
+    (org-linear-test--sync)
+    (should (org-linear-test--issue-titled "Second"))
+    (should (org-linear-test--uuid-of "work.org" "Second"))))
+
+(ert-deftest org-linear-test-in-place-refused-create-left-alone ()
+  "A heading whose creation Linear refused does not make its file be read again."
+  (org-linear-test--with-notes '(("work.org" . "* TODO REJECT this\n"))
+    (dotimes (_ 4) (org-linear-test--sync))
+    (should (= 1 (length (org-linear-test--calls-ever "OrgLinearCreate"))))
+    (with-current-buffer (get-buffer-create org-linear--log-buffer)
+      (should (= 1 (how-many "Not created again" (point-min) (point-max)))))))
 
 (ert-deftest org-linear-test-in-place-create-limit ()
   "No more than `org-linear-create-limit' issues are created in one sync."

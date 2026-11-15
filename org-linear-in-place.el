@@ -82,13 +82,15 @@ the IDs of linked headings in scope to markers; :new lists markers at
 headings in scope that have no issue yet; :pending holds the IDs their
 creation was sent with; :duplicates holds IDs with several headings;
 :buffers lists the buffers the sync may edit and :opened those it
-visited itself; :skipped maps files to why they are left out."
+visited itself; :unfinished lists the files holding headings whose
+creation this sync sends or defers, by name, since the sync may close a
+file and visit it again; :skipped maps files to why they are left out."
   (let ((scan (list :present (make-hash-table :test #'equal)
                     :tasks (make-hash-table :test #'equal)
                     :new nil
                     :pending (make-hash-table :test #'equal)
                     :duplicates (make-hash-table :test #'equal)
-                    :buffers nil :opened nil :linked nil
+                    :buffers nil :opened nil :linked nil :unfinished nil
                     :skipped (make-hash-table :test #'equal)
                     :indexed (make-hash-table :test #'equal)))
         (cache (org-linear-in-place--cache))
@@ -684,6 +686,8 @@ so that a lost answer is found again rather than repeated."
     (when (nthcdr org-linear-create-limit new)
       (org-linear--log "Creating %d of %d new headings; the rest follow in the next syncs"
                        org-linear-create-limit (length new)))
+    (dolist (marker (nthcdr org-linear-create-limit new))
+      (org-linear-in-place--mark-unfinished (marker-buffer marker)))
     (dolist (marker now)
       (let* ((view (org-linear--local-view marker))
              (pending (or (org-entry-get marker "LINEAR_PENDING_UUID")
@@ -698,8 +702,20 @@ so that a lost answer is found again rather than repeated."
         (if (member (org-linear--op-signature op) (plist-get org-linear--state :rejected-adds))
             (org-linear--log "Not created again: Linear refused \"%s\"; change it to retry"
                              (plist-get view :title))
+          (org-linear-in-place--mark-unfinished (marker-buffer marker))
           (push op ops))))
     (nreverse ops)))
+
+(defun org-linear-in-place--mark-unfinished (buffer)
+  "Record that BUFFER holds headings whose creation is sent or deferred.
+The next sync reads its file again, whatever the file's text suggests, so
+that a creation that failed before Linear acted on it is sent again.  A
+heading whose creation Linear refused does not count: it waits until it
+changes."
+  (let ((file (buffer-file-name buffer)))
+    (unless (member file (plist-get org-linear--scan :unfinished))
+      (plist-put org-linear--scan :unfinished
+                 (cons file (plist-get org-linear--scan :unfinished))))))
 
 (defun org-linear-in-place--link-created (place view md task)
   "Link TASK, created from VIEW and sent with description MD, to its heading.
@@ -848,12 +864,15 @@ Add the heading at the end if it is missing."
       (kill-buffer buffer))))
 
 (defun org-linear-in-place--refresh-cache (buffer)
-  "Record BUFFER's file, as saved, in the scan cache."
-  (let ((file (buffer-file-name buffer)))
-    (puthash file
-             (org-linear-in-place--read-file
-              file buffer (file-attribute-modification-time (file-attributes file)))
-             (org-linear-in-place--cache))))
+  "Record BUFFER's file, as saved, in the scan cache.
+A file holding headings whose creation this sync sends or defers is
+marked to be read again by the next sync."
+  (let* ((file (buffer-file-name buffer))
+         (entry (org-linear-in-place--read-file
+                 file buffer (file-attribute-modification-time (file-attributes file)))))
+    (when (member file (plist-get org-linear--scan :unfinished))
+      (setq entry (plist-put entry :new t)))
+    (puthash file entry (org-linear-in-place--cache))))
 
 ;;;; Preview
 
