@@ -3237,5 +3237,40 @@ DEADLINE: <2026-12-01 Tue>
       (org-linear-in-place--scan)
       (should (= calls 0)))))
 
+;; A sync interrupted by a quit or a throw does not stay busy.
+
+(ert-deftest org-linear-test-sync-quit-in-start-ends-sync ()
+  "A quit while a sync starts clears `org-linear--busy'."
+  (let ((org-linear--busy nil) (org-linear--pending nil) (failed nil)
+        (org-linear-teams '("AS")))
+    (cl-letf (((symbol-function 'org-linear--start) (lambda () (signal 'quit nil)))
+              ((symbol-function 'org-linear--fail)
+               (lambda (&rest args) (setq failed args org-linear--busy nil))))
+      (should (eq (condition-case nil (org-linear--sync nil) (quit 'quit)) 'quit))
+      (should-not org-linear--busy)
+      (should (equal failed '("interrupted before it finished"))))))
+
+(ert-deftest org-linear-test-sync-throw-in-callback-ends-sync ()
+  "A throw out of a process callback ends the sync it belongs to."
+  (let ((org-linear--busy t) (failed nil))
+    (cl-letf (((symbol-function 'org-linear--fail)
+               (lambda (&rest args) (setq failed args org-linear--busy nil))))
+      (catch 'away
+        (org-linear--ending-sync-on-failure (throw 'away nil)))
+      (should-not org-linear--busy)
+      (should (equal failed '("interrupted before it finished"))))))
+
+(ert-deftest org-linear-test-sync-error-and-return-in-callback ()
+  "An error is reported with its message; a normal return ends nothing."
+  (let ((org-linear--busy t) (failed nil))
+    (cl-letf (((symbol-function 'org-linear--fail)
+               (lambda (&rest args) (setq failed args org-linear--busy nil))))
+      (should (eq (org-linear--ending-sync-on-failure 'done) 'done))
+      (should org-linear--busy)
+      (should-not failed)
+      (org-linear--ending-sync-on-failure (error "Boom"))
+      (should-not org-linear--busy)
+      (should (equal failed '("%s" "Boom"))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

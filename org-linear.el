@@ -578,6 +578,24 @@ sync runs in the profile in effect."
         (org-linear--sync announce))
     (org-linear--sync announce)))
 
+(defmacro org-linear--ending-sync-on-failure (&rest body)
+  "Run BODY, and end the sync as failed if BODY does not return normally.
+An error is logged with its message.  A quit, or a throw such as leaving
+a debugger with `top-level', is not an error, so `condition-case' alone
+let it through and left `org-linear--busy' set: every later sync then
+only queued itself behind one that would never end.  Such an exit ends
+the sync too, and then continues."
+  (declare (indent 0) (debug t))
+  (let ((returned (make-symbol "returned")))
+    `(let ((,returned nil))
+       (unwind-protect
+           (condition-case failure
+               (prog1 (progn ,@body) (setq ,returned t))
+             (error (setq ,returned t)
+                    (org-linear--fail "%s" (error-message-string failure))))
+         (unless ,returned
+           (org-linear--fail "interrupted before it finished"))))))
+
 (defun org-linear--sync (announce)
   "Sync in the profile in effect; ANNOUNCE is as in `org-linear-sync'."
   (unless org-linear-teams
@@ -594,9 +612,8 @@ sync runs in the profile in effect."
           org-linear--rerun nil
           org-linear--stats (list :pulled 0 :pushed 0 :created 0 :archived 0
                                   :conflicts 0 :errors 0))
-    (condition-case err
-        (org-linear--start)
-      (error (org-linear--fail "%s" (error-message-string err))))))
+    (org-linear--ending-sync-on-failure
+      (org-linear--start))))
 
 (autoload 'org-linear-preview "org-linear-in-place"
   "Show what the next in-place sync would create and skip." t)
@@ -3107,9 +3124,8 @@ error in CALLBACK ends the sync instead of leaving it running: the sync
 of the profile CALLBACK runs in, not that of the default profile."
   (let* ((callback (org-linear--bound
                     (lambda (&rest args)
-                      (condition-case failure
-                          (apply callback args)
-                        (error (org-linear--fail "%s" (error-message-string failure)))))))
+                      (org-linear--ending-sync-on-failure
+                        (apply callback args)))))
          (out (generate-new-buffer " *org-linear-out*"))
          (err (generate-new-buffer " *org-linear-err*"))
          (proc (make-process
