@@ -2264,11 +2264,17 @@ not sent again while later edits still go through."
     (org-linear-in-place--flush)))
 
 (defun org-linear--fail (format-string &rest args)
-  "End the sync with an error described by FORMAT-STRING and ARGS."
+  "End the sync with an error described by FORMAT-STRING and ARGS.
+The sync ends even if saving what it linked fails too, or is quit; that
+is logged."
   (let ((text (apply #'format format-string args)))
-    (org-linear--flush-in-place)
-    (when (eq org-linear-layout 'in-place)
-      (org-linear-in-place--after-failure))
+    (condition-case failure
+        (progn
+          (org-linear--flush-in-place)
+          (when (eq org-linear-layout 'in-place)
+            (org-linear-in-place--after-failure)))
+      ((error quit)
+       (org-linear--log "Error while ending the sync: %s" (error-message-string failure))))
     (org-linear--log "Error: %s" text)
     (setq org-linear--api-key-cache nil
           org-linear--announce nil

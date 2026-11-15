@@ -1315,6 +1315,16 @@ Each mirrors it into its own file, and the default profile has no teams."
     (should-not org-linear--busy)
     (should (string-match-p "Boom" (org-linear-test--log)))))
 
+(ert-deftest org-linear-test-failing-cleanup-still-ends-the-sync ()
+  "An error while a failed sync cleans up does not leave it running."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (cl-letf (((symbol-function 'org-linear-in-place--flush) (lambda () (error "Flush broke")))
+              ((symbol-function 'org-linear-in-place--apply) (lambda (&rest _) (error "Boom"))))
+      (org-linear-test--sync))
+    (should-not org-linear--busy)
+    (should (string-match-p "Boom" (org-linear-test--log)))
+    (should (string-match-p "Flush broke" (org-linear-test--log)))))
+
 (ert-deftest org-linear-test-callback-error-ends-its-profile-sync ()
   "An error in a callback of a profile's sync ends that profile's sync."
   (org-linear-test--with-profiles
@@ -2651,6 +2661,27 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (should (plist-get (org-linear-in-place--read-file
                           (expand-file-name "todo.org" org-linear-test--notes) nil nil)
                          :candidates)))))
+
+(ert-deftest org-linear-test-in-place-merge-callback-error-ends-sync ()
+  "An error after the merge function answers ends the sync instead of wedging it.
+The function answers later, as a model's reply does, outside the sync's
+own callbacks."
+  (org-linear-test--with-notes
+      '(("code.org" . "* TODO Fix script\n#+begin_src emacs-lisp :tangle yes\n(foo)\n#+end_src\n"))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Fix script")))
+          (org-linear-merge-body-function
+           (lambda (_org _old _new callback)
+             (run-at-time 0 nil (lambda () (funcall callback "Merged."))))))
+      (org-linear-test--edit id 'description "``` commonlisp\n(bar)\n```")
+      (cl-letf (((symbol-function 'org-linear-in-place--check-merge)
+                 (lambda (&rest _) (error "Merge check broke"))))
+        (org-linear-sync)
+        (let ((deadline (+ (float-time) 10)))
+          (while (and org-linear--busy (< (float-time) deadline))
+            (accept-process-output nil 0.05))))
+      (should-not org-linear--busy)
+      (should (string-match-p "Merge check broke" (org-linear-test--log))))))
 
 (ert-deftest org-linear-test-in-place-linear-rewrite-is-not-an-edit ()
   "Linear's rewrite of a description it was sent changes no heading."

@@ -608,15 +608,18 @@ it is not sent to the model again."
                body old-md md
                (org-linear--bound
                 (lambda (merged)
-                  (if (not (stringp merged))
-                      (funcall hold "the merge failed")
-                    (org-linear-in-place--check-merge
-                     merged md
-                     (lambda (ok)
-                       (if ok
-                           (progn (puthash id (string-trim merged) org-linear--body-overrides)
-                                  (funcall next))
-                         (funcall hold "the merge does not say what Linear's text says")))))))))))
+                  ;; The rest of the sync runs in the merge function's
+                  ;; callback, a model's reply, outside the sync's own.
+                  (org-linear--ending-sync-on-failure
+                    (if (not (stringp merged))
+                        (funcall hold "the merge failed")
+                      (org-linear-in-place--check-merge
+                       merged md
+                       (lambda (ok)
+                         (if ok
+                             (progn (puthash id (string-trim merged) org-linear--body-overrides)
+                                    (funcall next))
+                           (funcall hold "the merge does not say what Linear's text says"))))))))))))
 
 (defun org-linear-in-place--check-merge (merged md callback)
   "Call CALLBACK with non-nil if the Org text MERGED says what Markdown MD says.
