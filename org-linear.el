@@ -605,6 +605,7 @@ sync runs in the profile in effect."
 (declare-function org-linear-in-place--run-archive "org-linear-in-place" (op next))
 (declare-function org-linear-in-place--link-created "org-linear-in-place" (place view md task))
 (declare-function org-linear-in-place--flush "org-linear-in-place" ())
+(declare-function org-linear-in-place--after-failure "org-linear-in-place" ())
 (declare-function org-linear-in-place--known-relations "org-linear-in-place" (op))
 (declare-function org-linear-in-place--sent-relations "org-linear-in-place" (base relations))
 (declare-function org-linear-in-place--run-object "org-linear-in-place" (op next))
@@ -2244,6 +2245,8 @@ not sent again while later edits still go through."
   "End the sync with an error described by FORMAT-STRING and ARGS."
   (let ((text (apply #'format format-string args)))
     (org-linear--flush-in-place)
+    (when (eq org-linear-layout 'in-place)
+      (org-linear-in-place--after-failure))
     (org-linear--log "Error: %s" text)
     (setq org-linear--api-key-cache nil
           org-linear--announce nil

@@ -100,9 +100,10 @@ the IDs of linked headings in scope to markers; :new lists markers at
 headings in scope that have no issue yet; :pending holds the IDs their
 creation was sent with; :duplicates holds IDs with several headings;
 :buffers lists the buffers the sync may edit and :opened those it
-visited itself; :unfinished lists the files holding headings whose
-creation this sync sends or defers, by name, since the sync may close a
-file and visit it again; :skipped maps files to why they are left out.
+visited itself; :read lists the names of the files it indexed;
+:unfinished lists the files holding headings whose creation this sync
+sends or defers, by name, since the sync may close a file and visit it
+again; :skipped maps files to why they are left out.
 With a hierarchy, :nodes lists the nodes of task, project and milestone
 headings, :node-of maps the markers of tasks to their nodes, :objects
 maps the IDs of linked projects, initiatives and milestones to (KIND .
@@ -116,7 +117,7 @@ NODE), and :object-pending does the same for those being created."
                     :node-of (make-hash-table :test #'eq)
                     :objects (make-hash-table :test #'equal)
                     :object-pending (make-hash-table :test #'equal)
-                    :buffers nil :opened nil :linked nil :unfinished nil
+                    :buffers nil :opened nil :linked nil :unfinished nil :read nil
                     :skipped (make-hash-table :test #'equal)
                     :indexed (make-hash-table :test #'equal)))
         (cache (org-linear-in-place--cache))
@@ -258,6 +259,7 @@ is not indexed again, so that no heading is counted twice."
           (org-with-wide-buffer
            (org-linear-in-place--index-buffer scan)))
         (push buffer (plist-get scan :buffers))
+        (push (buffer-file-name buffer) (plist-get scan :read))
         buffer)))
 
 (defun org-linear-in-place--usable-buffer (file scan)
@@ -991,6 +993,17 @@ Add the heading at the end if it is missing."
   (dolist (buffer (plist-get org-linear--scan :opened))
     (when (and (buffer-live-p buffer) (not (buffer-modified-p buffer)))
       (kill-buffer buffer))))
+
+(defun org-linear-in-place--after-failure ()
+  "Mark the files this sync read to be read again by the next sync.
+A sync that failed may not have sent their edits, and the next sync
+would otherwise take the files for unchanged.  The state is saved."
+  (when (and org-linear--state org-linear--scan)
+    (let ((cache (org-linear-in-place--cache)))
+      (dolist (file (plist-get org-linear--scan :read))
+        (when-let* ((entry (gethash file cache)))
+          (puthash file (plist-put entry :new t) cache))))
+    (org-linear--save-state)))
 
 (defun org-linear-in-place--refresh-cache (buffer)
   "Record BUFFER's file, as saved, in the scan cache.

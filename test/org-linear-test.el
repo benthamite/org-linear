@@ -2505,6 +2505,29 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
     (should (org-linear-test--issue-titled "Second"))
     (should (org-linear-test--uuid-of "work.org" "Second"))))
 
+(ert-deftest org-linear-test-in-place-failed-sync-sends-edits-later ()
+  "An Org edit a failed sync did not send is sent by a later one."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          (later (format-time-string "%FT%TZ" (time-add nil 3600) t)))
+      (dolist (failing '("OrgLinearIssues" "OrgLinearUpdate"))
+        (org-linear-test--write-note
+         "health.org" (replace-regexp-in-string "^Call .*$" (format "Call %s." failing)
+                                                (org-linear-test--note "health.org")))
+        (setq org-linear-test--fail-next failing)
+        (org-linear-sync)
+        (let ((deadline (+ (float-time) 30)))
+          (while (and org-linear--busy (< (float-time) deadline))
+            (accept-process-output nil 0.05)))
+        (should-not (equal (alist-get 'description (gethash id org-linear-test--issues))
+                           (format "Call %s." failing)))
+        ;; As if the next sync came later than the overlap of the fetches.
+        (plist-put org-linear--state :since later)
+        (org-linear-test--sync)
+        (should (equal (alist-get 'description (gethash id org-linear-test--issues))
+                       (format "Call %s." failing)))))))
+
 (ert-deftest org-linear-test-in-place-refused-create-left-alone ()
   "A heading whose creation Linear refused does not make its file be read again."
   (org-linear-test--with-notes '(("work.org" . "* TODO REJECT this\n"))
