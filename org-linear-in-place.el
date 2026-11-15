@@ -792,15 +792,18 @@ the IDs this sync fetched; it does not change the answer, since a trashed
 issue has already left the state.  With a hierarchy, projects and
 initiatives are archived and milestones deleted on the same terms, after
 the issues.  More than `org-linear-archive-limit' of them in all archive
-none."
+none.  One whose archive Linear refused is not sent again."
   (let ((present (plist-get org-linear--scan :present))
         gone objects)
     (ignore fetched)
-    (maphash (lambda (id _) (unless (gethash id present) (push id gone)))
+    (maphash (lambda (id base)
+               (unless (or (gethash id present) (org-linear-in-place--archive-refused-p id base))
+                 (push id gone)))
              (org-linear--state-tasks))
     (when (org-linear-in-place--hierarchy-p)
       (maphash (lambda (id base)
-                 (unless (gethash id present) (push (cons id (plist-get base :kind)) objects)))
+                 (unless (or (gethash id present) (org-linear-in-place--archive-refused-p id base))
+                   (push (cons id (plist-get base :kind)) objects)))
                (org-linear--state-objects)))
     (cond
      ((> (+ (length gone) (length objects)) org-linear-archive-limit)
@@ -818,6 +821,10 @@ none."
                                       (< (seq-position '(milestone project initiative) (cdr a))
                                          (seq-position '(milestone project initiative) (cdr b)))))))))))
 
+(defun org-linear-in-place--archive-refused-p (id base)
+  "Return non-nil if Linear refused to archive ID, as its BASE records."
+  (member (org-linear--op-signature (list :type 'archive :id id)) (plist-get base :rejected)))
+
 (defun org-linear-in-place--run-archive (op next)
   "Archive the issue of OP in Linear, then call NEXT."
   (let ((id (plist-get op :id)))
@@ -831,7 +838,22 @@ none."
        (org-linear--log "Archived %s in Linear: its heading is no longer in Org" id)
        (org-linear--count :archived)
        (funcall next))
-     (org-linear--rejected-handler op next))))
+     (org-linear-in-place--archive-refused op next))))
+
+(defun org-linear-in-place--archive-refused (op next)
+  "Return a handler for an archive of OP that Linear refused; it calls NEXT.
+When Linear no longer has the object, there is nothing left to archive:
+the sync forgets it.  Any other refusal is remembered, so that the
+archive is not sent again."
+  (lambda (message &rest args)
+    (if (not (org-linear--not-found-p message))
+        (apply (org-linear--rejected-handler op next) message args)
+      (let ((id (plist-get op :id)))
+        (remhash id (org-linear--state-tasks))
+        (remhash id (org-linear--state-objects))
+        (org-linear--save-state)
+        (org-linear--log "Forgot %s: its heading is no longer in Org, and Linear no longer has it" id)
+        (funcall next)))))
 
 ;;;; Creating issues
 
@@ -2127,7 +2149,7 @@ Either can be nil, for none.  REFUSED handles an error."
                         (if (eq kind 'milestone) "Deleted" "Archived") kind id)
        (org-linear--count :archived)
        (funcall next))
-     (org-linear--rejected-handler op next))))
+     (org-linear-in-place--archive-refused op next))))
 
 ;;;; Preview
 

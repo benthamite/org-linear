@@ -300,9 +300,12 @@ A string is an error message."
          `((issueCreate . ((success . t) (issue . ,(gethash id org-linear-test--issues))))))))
     ("OrgLinearArchive"
      (let ((issue (gethash (alist-get 'id variables) org-linear-test--issues)))
-       (setf (alist-get 'archived issue) t)
-       (puthash (alist-get 'id variables) issue org-linear-test--issues)
-       '((issueArchive . ((success . t))))))
+       (cond
+        ((null issue) "Entity not found: Issue")
+        ((alist-get 'refuse-archive issue) "Forbidden")
+        (t (setf (alist-get 'archived issue) t)
+           (puthash (alist-get 'id variables) issue org-linear-test--issues)
+           '((issueArchive . ((success . t))))))))
     ("OrgLinearLabel"
      (let ((label `((id . ,(format "l-new-%d" (cl-incf org-linear-test--clock)))
                     (name . ,(alist-get 'name (alist-get 'input variables)))
@@ -2374,6 +2377,33 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (should (alist-get 'archived (gethash id org-linear-test--issues)))
       (org-linear-test--sync)
       (should-not (string-match-p "Book dentist" (org-linear-test--note "inbox.org"))))))
+
+(ert-deftest org-linear-test-in-place-gone-issue-forgotten ()
+  "A vanished heading whose issue Linear no longer has is forgotten, not retried."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist"))))
+      (remhash id org-linear-test--issues)
+      (org-linear-test--write-note "health.org" "* Health\n")
+      (org-linear-test--sync)
+      (should-not (gethash id (org-linear--state-tasks)))
+      (should (string-match-p "Linear no longer has it" (org-linear-test--log)))
+      (should-not (string-match-p "Rejected" (org-linear-test--log)))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearArchive")))))
+
+(ert-deftest org-linear-test-in-place-refused-archive-not-retried ()
+  "An archive Linear refuses for another reason is not sent again."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist"))))
+      (org-linear-test--edit id 'refuse-archive t)
+      (org-linear-test--write-note "health.org" "* Health\n")
+      (org-linear-test--sync)
+      (should (= 1 (length (org-linear-test--calls "OrgLinearArchive"))))
+      (should (string-match-p "Forbidden" (org-linear-test--log)))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearArchive")))))
 
 (ert-deftest org-linear-test-in-place-mass-vanishing-archives-nothing ()
   "More vanished headings than `org-linear-archive-limit' archive none."

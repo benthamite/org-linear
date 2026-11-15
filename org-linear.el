@@ -1734,6 +1734,7 @@ BASE its state."
                     ('object-update (list 'object-update (plist-get op :kind)
                                           (plist-get op :fields)))
                     ('object-relate (list 'object-relate (plist-get op :kind)))
+                    ((or 'archive 'object-archive) (list 'archive (plist-get op :id)))
                     (type (list type)))
                   (when relations (list relations))))))
 
@@ -2219,6 +2220,10 @@ not sent again while later edits still go through."
     (org-linear--remember-rejection op)
     (org-linear--save-state)
     (funcall next)))
+
+(defun org-linear--not-found-p (message)
+  "Return non-nil if MESSAGE, Linear's error, says the object does not exist."
+  (string-match-p "\\`Entity not found" message))
 
 (defun org-linear--remember-rejection (op)
   "Record that Linear rejected OP."
