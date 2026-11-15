@@ -3100,8 +3100,13 @@ remembered as refused."
 (defun org-linear--run-process (command input callback)
   "Run COMMAND asynchronously, feeding it INPUT if non-nil.
 Call CALLBACK with the exit code, the output and the error output.  An
-error in CALLBACK ends the sync instead of leaving it running."
-  (let* ((callback (org-linear--bound callback))
+error in CALLBACK ends the sync instead of leaving it running: the sync
+of the profile CALLBACK runs in, not that of the default profile."
+  (let* ((callback (org-linear--bound
+                    (lambda (&rest args)
+                      (condition-case failure
+                          (apply callback args)
+                        (error (org-linear--fail "%s" (error-message-string failure)))))))
          (out (generate-new-buffer " *org-linear-out*"))
          (err (generate-new-buffer " *org-linear-err*"))
          (proc (make-process
@@ -3121,9 +3126,7 @@ error in CALLBACK ends the sync instead of leaving it running."
                           (stderr (with-current-buffer err (buffer-string))))
                       (kill-buffer out)
                       (kill-buffer err)
-                      (condition-case failure
-                          (funcall callback code stdout stderr)
-                        (error (org-linear--fail "%s" (error-message-string failure))))))))))
+                      (funcall callback code stdout stderr)))))))
     (when input (process-send-string proc input))
     (process-send-eof proc)))
 

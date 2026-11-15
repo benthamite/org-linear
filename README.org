@@ -337,7 +337,7 @@ The options above make up the default profile. ~org-linear-profiles~ adds furthe
                   :api-key-command ("my-password-tool" "read" "linear-personal"))))
 #+end_src
 
-The default profile syncs when ~org-linear-teams~ is set; the others always do under ~org-linear-auto-sync-mode~. =M-x org-linear-sync= syncs the profile of the current buffer; with a prefix argument it asks which. ~org-linear-show-log~ shows the current buffer's profile's log, =*org-linear: NAME*= for a named profile.
+The default profile syncs when ~org-linear-teams~ is set; the others always do under ~org-linear-auto-sync-mode~. =M-x org-linear-sync= syncs the profile of the current buffer; with a prefix argument it asks which. ~org-linear-show-log~ shows the current buffer's profile's log, =*org-linear: NAME*= for a named profile. A sync that fails ends with the error in its own profile's log, and the other profiles keep syncing.
 
 * The in-place layout
 :PROPERTIES:

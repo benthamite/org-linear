@@ -1303,6 +1303,18 @@ Each mirrors it into its own file, and the default profile has no teams."
     (should-not org-linear--busy)
     (should (string-match-p "Boom" (org-linear-test--log)))))
 
+(ert-deftest org-linear-test-callback-error-ends-its-profile-sync ()
+  "An error in a callback of a profile's sync ends that profile's sync."
+  (org-linear-test--with-profiles
+    (org-linear--with-profile 'work
+      (setq org-linear--busy t)
+      (org-linear--run-process (list "true") nil (lambda (&rest _) (error "Boom"))))
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (org-linear--with-profile 'work org-linear--busy) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should-not (org-linear--with-profile 'work org-linear--busy))
+    (should (string-match-p "Boom" (org-linear--with-profile 'work (org-linear-test--log))))))
+
 ;;;; Talking to Linear
 
 (ert-deftest org-linear-test-key-stays-off-the-command-line ()
