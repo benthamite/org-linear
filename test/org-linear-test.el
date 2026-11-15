@@ -2014,6 +2014,21 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
                                              (string-prefix-p org-linear-test--notes (buffer-file-name b))))
                             (buffer-list)))))
 
+(ert-deftest org-linear-test-in-place-assigns-new-issues ()
+  "With the option set, an issue created from a heading is assigned to the viewer."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (let ((org-linear-assign-new-issues t))
+      (org-linear-test--sync))
+    (let ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearCreate")))))
+      (should (equal (alist-get 'assigneeId input) "u-pablo")))))
+
+(ert-deftest org-linear-test-in-place-leaves-new-issues-unassigned ()
+  "Without the option, an issue created from a heading has no assignee."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((input (alist-get 'input (cdar (org-linear-test--calls "OrgLinearCreate")))))
+      (should-not (assq 'assigneeId input)))))
+
 (ert-deftest org-linear-test-in-place-second-sync-quiet ()
   "A sync right after the first sends nothing and changes no file."
   (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))

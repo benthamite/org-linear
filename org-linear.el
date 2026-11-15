@@ -354,6 +354,13 @@ The other side's value is written to the sync log."
   :type '(choice (const linear) (const org))
   :group 'org-linear)
 
+(defcustom org-linear-assign-new-issues nil
+  "Non-nil means the in-place layout assigns the issues it creates to you.
+You are the owner of the API key.  Otherwise those issues have no
+assignee, and Linear's \"My issues\" leaves them out."
+  :type 'boolean
+  :group 'org-linear)
+
 (defcustom org-linear-merge-body-function nil
   "Function that merges a Linear description edit into an Org body, or nil.
 The in-place layout calls it when Linear changed a description and the
@@ -1999,7 +2006,8 @@ answer was lost is then found by the next sync instead of repeated."
                                 (org-linear--field-input :deadline (plist-get view :deadline) team))
                               (when (plist-get view :project)
                                 (org-linear--field-input :project (plist-get view :project) team))
-                              (org-linear--tags-input (plist-get view :tags) team nil))
+                              (org-linear--tags-input (plist-get view :tags) team nil)
+                              (org-linear--new-issue-assignee))
                       nil start (and start t) team)))
          (org-linear--graphql
           (format "mutation OrgLinearCreate($input: IssueCreateInput!) {
@@ -2009,6 +2017,13 @@ answer was lost is then found by the next sync instead of repeated."
             (org-linear--finish-create
              op md (org-linear--task (alist-get 'issue (alist-get 'issueCreate data))) next))
           (org-linear--rejected-handler op next)))))))
+
+(defun org-linear--new-issue-assignee ()
+  "Return the input that assigns a new issue to the owner of the API key.
+It is nil unless `org-linear-assign-new-issues' is set in the in-place
+layout; the mirror layout takes the assignee from the heading's tags."
+  (when (and org-linear-assign-new-issues (eq org-linear-layout 'in-place))
+    `((assigneeId . ,(plist-get org-linear--meta :viewer)))))
 
 (defun org-linear--finish-create (op md task next)
   "Link TASK, created for OP with description MD, to its heading; then NEXT.
