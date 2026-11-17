@@ -3947,5 +3947,36 @@ list kept its old keys until Emacs was restarted (17 Nov 2026)."
       (define-key org-linear-file-mode-map [remap org-refile] refile)
       (define-key org-linear-my-issues-mode-map "!" nil t))))
 
+(ert-deftest org-linear-test-in-place-narrowed-buffer-keeps-its-issues ()
+  "A visited file narrowed to a subtree still counts with all its issues.
+The scan cache read only the narrowed part of the buffer, so the issues
+of the headings outside it looked gone from Org and were archived in
+Linear (17 Nov 2026)."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          (buffer (find-file-noselect (expand-file-name "health.org" org-linear-test--notes))))
+      (with-current-buffer buffer
+        (goto-char (point-min))
+        (re-search-forward "^\\*\\* Plain heading")
+        (org-narrow-to-subtree))
+      ;; The sync edits and saves the buffer, then records what its file holds.
+      (org-linear-test--edit id 'title "Book the dentist")
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Book the dentist" (org-linear-test--note "health.org")))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearArchive"))
+      (should-not (alist-get 'archived (gethash id org-linear-test--issues)))
+      ;; With unsaved edits, the scan reads the buffer instead of the file.
+      (with-current-buffer buffer
+        (should (buffer-narrowed-p))
+        (goto-char (point-max))
+        (insert "Mine.\n"))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearArchive"))
+      (should-not (alist-get 'archived (gethash id org-linear-test--issues)))
+      (with-current-buffer buffer
+        (should (buffer-narrowed-p))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

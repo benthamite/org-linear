@@ -332,7 +332,7 @@ MTIME is FILE's modification time.  Its :uuids include the IDs of
 creations in flight, so that their issues count as present."
   (with-temp-buffer
     (if buffer
-        (insert-buffer-substring buffer)
+        (org-linear-in-place--insert-whole buffer)
       (insert-file-contents file))
     (goto-char (point-min))
     (let ((candidates (save-excursion
@@ -345,6 +345,18 @@ creations in flight, so that their issues count as present."
         (push (match-string-no-properties 1) uuids))
       (list :mtime mtime :uuids (nreverse uuids) :candidates (and candidates t)
             :new (and candidates (org-linear-in-place--unlinked-heading-p))))))
+
+(defun org-linear-in-place--insert-whole (buffer)
+  "Insert at point the whole text of BUFFER, whatever BUFFER is narrowed to.
+`insert-buffer-substring' alone takes the part BUFFER is narrowed to, and
+the issues of the headings outside it would then count as gone from Org,
+which archives them in Linear."
+  (let ((target (current-buffer)))
+    (with-current-buffer buffer
+      (save-restriction
+        (widen)
+        (with-current-buffer target
+          (insert-buffer-substring buffer))))))
 
 (defun org-linear-in-place--unlinked-heading-p ()
   "Return non-nil if the current buffer's text may hold a heading to create.
