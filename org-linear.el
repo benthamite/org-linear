@@ -249,6 +249,7 @@ changes.  No sync starts while the file has unsaved edits."
 
 (defvar org-linear-auto-sync-mode)
 (defvar org-agenda-custom-commands)
+(defvar org-agenda-finalize-hook)
 
 (defvar org-linear--list-buffer nil
   "The buffer showing `org-linear-my-issues', or nil.")
@@ -716,7 +717,7 @@ when `org-agenda-sticky' would reuse it, and it then syncs, as
               (org-agenda-todo-ignore-deadlines nil)
               (org-agenda-todo-ignore-timestamp nil)
               (org-agenda-todo-ignore-scheduled 'future)
-              (org-agenda-finalize-hook '(org-linear--list-setup))
+              (org-agenda-finalize-hook (org-linear--list-finalize-functions))
               (org-agenda-sorting-strategy '((todo deadline-up priority-down alpha-up))))))))
     (org-agenda nil "L"))
   (when org-linear-my-issues-sync
@@ -724,6 +725,14 @@ when `org-agenda-sticky' would reuse it, and it then syncs, as
     (org-linear--timer-sync)
     (unless org-linear--busy
       (setq org-linear--refresh-list nil))))
+
+(defun org-linear--list-finalize-functions ()
+  "Return the value of `org-agenda-finalize-hook' for a build of the list.
+That is `org-linear--list-setup' followed by the hook's global value, as
+it is at this build, so that what other packages add to an agenda's lines
+is added to the list's too, each time it is rebuilt."
+  (cons #'org-linear--list-setup
+        (remq #'org-linear--list-setup (default-value 'org-agenda-finalize-hook))))
 
 (declare-function org-agenda-todo "org-agenda" (&optional arg))
 (declare-function org-agenda-add-note "org-agenda" (&optional arg))

@@ -3890,5 +3890,34 @@ after the closing from one that came before it (17 Nov 2026)."
                                      (org-linear-test--closed-stamp closed-at)))
                (org-linear-test--note "health.org"))))))
 
+(defvar org-agenda-finalize-hook)
+
+(ert-deftest org-linear-test-my-issues-runs-the-global-finalize-hook ()
+  "The list runs what other packages put on `org-agenda-finalize-hook'.
+It replaced the hook with its own function, so another package's marks
+on the list's lines were gone after each rebuild (17 Nov 2026)."
+  (require 'org-agenda)
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let* ((runs 0)
+           (set-up nil)
+           (other (lambda ()
+                    (cl-incf runs)
+                    (setq set-up (bound-and-true-p org-linear-my-issues-mode))))
+           (org-agenda-finalize-hook (list other)))
+      (unwind-protect
+          (progn
+            (org-linear-my-issues)
+            (should (= runs 1))
+            ;; The list is set up before the others decorate it.
+            (should set-up)
+            (with-current-buffer org-agenda-buffer-name
+              (org-agenda-redo t)
+              (should (= runs 2))
+              (should org-linear-my-issues-mode))
+            (should (equal org-agenda-finalize-hook (list other))))
+        (when (get-buffer org-agenda-buffer-name)
+          (kill-buffer org-agenda-buffer-name))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
