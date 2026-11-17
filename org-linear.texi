@@ -449,7 +449,7 @@ The key reaches @samp{curl} on its standard input@comma{} never on its command l
 @vindex org-linear-curl-program
 @vindex org-linear-pandoc-program
 @vindex org-linear-timeout
-@code{org-linear-curl-program} and @code{org-linear-pandoc-program} name the @samp{curl} and @samp{pandoc} executables. @code{org-linear-timeout}@comma{} 60 by default@comma{} is how many seconds a request to Linear may take before it is abandoned and the sync fails.
+@code{org-linear-curl-program} and @code{org-linear-pandoc-program} name the @samp{curl} and @samp{pandoc} executables. They run in the temporary directory@comma{} as does @code{org-linear-api-key-command}@comma{} whatever buffer you are in when a sync starts. @code{org-linear-timeout}@comma{} 60 by default@comma{} is how many seconds a request to Linear may take before it is abandoned and the sync fails.
 
 @node Profiles
 @section Profiles

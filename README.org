@@ -349,7 +349,7 @@ The key reaches =curl= on its standard input, never on its command line, where o
 #+vindex: org-linear-curl-program
 #+vindex: org-linear-pandoc-program
 #+vindex: org-linear-timeout
-~org-linear-curl-program~ and ~org-linear-pandoc-program~ name the =curl= and =pandoc= executables. ~org-linear-timeout~, 60 by default, is how many seconds a request to Linear may take before it is abandoned and the sync fails.
+~org-linear-curl-program~ and ~org-linear-pandoc-program~ name the =curl= and =pandoc= executables. They run in the temporary directory, as does ~org-linear-api-key-command~, whatever buffer you are in when a sync starts. ~org-linear-timeout~, 60 by default, is how many seconds a request to Linear may take before it is abandoned and the sync fails.
 
 ** Profiles
 :PROPERTIES:

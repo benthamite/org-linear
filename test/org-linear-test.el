@@ -4221,5 +4221,19 @@ stayed open (17 Nov 2026)."
       (should-not (org-linear-test--writes))
       (should (string-match-p "^\\* FIXED Fix it" (org-linear-test--note "work.org"))))))
 
+(ert-deftest org-linear-test-process-starts-whatever-the-current-directory ()
+  "A subprocess starts even if the current buffer's directory is gone.
+It started in the directory of whatever buffer was current, so a sync
+that came up while you were in a buffer whose directory had been deleted
+failed (17 Nov 2026)."
+  (let ((result nil))
+    (with-temp-buffer
+      (setq default-directory "/no/such/directory/")
+      (org-linear--run-process '("true") nil (lambda (code &rest _) (setq result code))))
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (null result) (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (should (eql result 0))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

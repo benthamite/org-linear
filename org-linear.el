@@ -4122,8 +4122,12 @@ remembered as refused."
   "Run COMMAND asynchronously, feeding it INPUT if non-nil.
 Call CALLBACK with the exit code, the output and the error output.  An
 error in CALLBACK ends the sync instead of leaving it running: the sync
-of the profile CALLBACK runs in, not that of the default profile."
-  (let* ((callback (org-linear--bound
+of the profile CALLBACK runs in, not that of the default profile.
+COMMAND runs in the temporary directory: a sync starts in whatever
+buffer is current, whose own directory may no longer exist, and no
+process starts in a missing one."
+  (let* ((default-directory temporary-file-directory)
+         (callback (org-linear--bound
                     (lambda (&rest args)
                       (org-linear--ending-sync-on-failure
                         (apply callback args)))))
