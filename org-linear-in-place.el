@@ -1474,13 +1474,16 @@ The edits give the issue the inbox file's label."
                       (org-end-of-subtree t t)
                       (unless (bolp) (insert "\n"))
                       (point)))
-               (marker (org-linear--marker pos))
                (base (append (copy-sequence view)
                              (list :desc-md (alist-get 'description task)
                                    :edited (alist-get 'last_edited_time task)
-                                   :note-keys nil :comment-ids nil))))
+                                   :note-keys nil :comment-ids nil)))
+               marker)
           (goto-char pos)
           (insert (org-linear--heading-string view (alist-get 'closed_at task) level))
+          ;; Made once the heading is there: inserted text pushes such a
+          ;; marker, which would end up at whatever follows the heading.
+          (setq marker (org-linear--marker pos))
           (org-linear--set-static-properties marker task)
           (setq base (org-linear--insert-comments marker comments base))
           (puthash (alist-get 'id task) base (org-linear--state-tasks))

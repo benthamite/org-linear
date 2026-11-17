@@ -488,7 +488,7 @@ A new heading in scope gets an issue. Before anything is sent@comma{} the headin
 @item
 Changes on either side are merged field by field@comma{} as in the mirror layout. When a field changed on both sides@comma{} @code{org-linear-conflict-winner} decides: set it to @samp{org} for this layout@comma{} and Linear's value goes to the sync log.
 @item
-An issue created in Linear goes under the heading @code{org-linear-inbox-heading} of @code{org-linear-inbox-file}. Refile it anywhere in scope and it keeps syncing.
+An issue created in Linear goes under the heading @code{org-linear-inbox-heading} of @code{org-linear-inbox-file}@comma{} as its last subheading@comma{} wherever that heading is in the file. Refile it anywhere in scope and it keeps syncing.
 @item
 An issue closed in Linear sets its heading's done keyword; the heading stays. A heading with a repeater repeats instead@comma{} once for each time the issue was closed: the @samp{LINEAR_REPEATED} property records the closing it acted on.
 @item

@@ -4150,5 +4150,20 @@ It left the file visited, without your hooks (17 Nov 2026)."
     (should-not (find-buffer-visiting (expand-file-name "health.org" org-linear-test--notes)))
     (should-not (org-linear-test--reading-buffers))))
 
+(ert-deftest org-linear-test-in-place-inbox-issue-linked-to-its-own-heading ()
+  "An issue added to the inbox is linked to its own heading, whatever follows it.
+Its properties went to the heading after the inbox's, when there was
+one, and the next sync sent that heading to Linear as the issue
+\(17 Nov 2026)."
+  (org-linear-test--with-notes '(("inbox.org" . "* Linear\n* Last\nMine.\n"))
+    (org-linear-test--sync)
+    (should (equal (org-linear-test--uuid-of "inbox.org" "Task one") "i1"))
+    (should (equal (org-linear-test--uuid-of "inbox.org" "Peter's task") "i6"))
+    (should-not (org-linear-test--uuid-of "inbox.org" "Last"))
+    (should (string-match-p "^\\* Last\nMine\\.\n\\'" (org-linear-test--note "inbox.org")))
+    (org-linear-test--sync)
+    (should-not (org-linear-test--writes))
+    (should (equal (alist-get 'title (gethash "i6" org-linear-test--issues)) "Peter's task"))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
