@@ -121,6 +121,8 @@ With Emacs's built-in @samp{package-vc} (Emacs 30 or later):
 
 Then create a personal API key in Linear (Settings@comma{} Security & access@comma{} Personal API keys)@comma{} give it access to the teams you mirror@comma{} and make it available to the package (@ref{The API key, , The API key}).
 
+After an update you need not restart Emacs for the package's keys: each time the package is loaded it sets the keys of its two keymaps@comma{} @code{org-linear-my-issues-mode-map} and @code{org-linear-file-mode-map}@comma{} again@comma{} and leaves the keys you bound in them yourself.
+
 @node The file
 @chapter The file
 

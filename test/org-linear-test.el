@@ -3919,5 +3919,33 @@ on the list's lines were gone after each rebuild (17 Nov 2026)."
         (when (get-buffer org-agenda-buffer-name)
           (kill-buffer org-agenda-buffer-name))))))
 
+(ert-deftest org-linear-test-loading-again-sets-the-keys-again ()
+  "Loading the package again gives its keymaps the keys of the code loaded.
+A `defvar' keeps the keymap the first load built, so after an update the
+list kept its old keys until Emacs was restarted (17 Nov 2026)."
+  (let ((list-map org-linear-my-issues-mode-map)
+        (todo (lookup-key org-linear-my-issues-mode-map "t"))
+        (refile (lookup-key org-linear-file-mode-map [remap org-refile])))
+    (should (eq todo #'org-linear-my-issues-todo))
+    (should (eq refile #'org-linear-set-project))
+    (unwind-protect
+        (progn
+          ;; As the keymaps of a version loaded earlier held them, and with
+          ;; a key of the user's own.
+          (define-key org-linear-my-issues-mode-map "t" #'ignore)
+          (define-key org-linear-file-mode-map [remap org-refile] #'ignore)
+          (define-key org-linear-my-issues-mode-map "!" #'ignore)
+          (load (locate-library "org-linear") nil t)
+          (should (eq (lookup-key org-linear-my-issues-mode-map "t") todo))
+          (should (eq (lookup-key org-linear-file-mode-map [remap org-refile]) refile))
+          ;; The keymap itself stays, since `minor-mode-map-alist' holds it,
+          ;; and so do the keys the package does not set.
+          (should (eq org-linear-my-issues-mode-map list-map))
+          (should (eq (cdr (assq 'org-linear-my-issues-mode minor-mode-map-alist)) list-map))
+          (should (eq (lookup-key org-linear-my-issues-mode-map "!") #'ignore)))
+      (define-key org-linear-my-issues-mode-map "t" todo)
+      (define-key org-linear-file-mode-map [remap org-refile] refile)
+      (define-key org-linear-my-issues-mode-map "!" nil t))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

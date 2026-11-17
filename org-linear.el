@@ -740,13 +740,15 @@ is added to the list's too, each time it is rebuilt."
 (declare-function org-agenda-refile "org-agenda" (&optional goto rfloc no-update))
 (declare-function org-refile "org-refile" (&optional arg default-buffer rfloc msg))
 
-(defvar org-linear-my-issues-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map "t" #'org-linear-my-issues-todo)
-    (define-key map "." #'org-linear-menu)
-    (define-key map [remap org-agenda-refile] #'org-linear-set-project)
-    map)
+(defvar org-linear-my-issues-mode-map (make-sparse-keymap)
   "Keymap of `org-linear-my-issues-mode'.")
+
+;; The keys are set outside the `defvar', whose value form runs only the
+;; first time: loading the package again in a running Emacs, as an update
+;; does, would otherwise leave the keymap with the keys of the old code.
+(define-key org-linear-my-issues-mode-map "t" #'org-linear-my-issues-todo)
+(define-key org-linear-my-issues-mode-map "." #'org-linear-menu)
+(define-key org-linear-my-issues-mode-map [remap org-agenda-refile] #'org-linear-set-project)
 
 (define-minor-mode org-linear-my-issues-mode
   "Minor mode for the list of `org-linear-my-issues'.
@@ -1140,12 +1142,12 @@ The file is saved only if it had no unsaved edits before."
             (setq org-linear--buffer-profile name)
             (org-linear-file-mode 1)))))))
 
-(defvar org-linear-file-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map [remap org-archive-subtree] #'org-linear-archive)
-    (define-key map [remap org-refile] #'org-linear-set-project)
-    map)
+(defvar org-linear-file-mode-map (make-sparse-keymap)
   "Keymap of `org-linear-file-mode'.")
+
+;; Set on every load, as the keys of `org-linear-my-issues-mode-map' are.
+(define-key org-linear-file-mode-map [remap org-archive-subtree] #'org-linear-archive)
+(define-key org-linear-file-mode-map [remap org-refile] #'org-linear-set-project)
 
 (define-minor-mode org-linear-file-mode
   "Send the file's changes to Linear whenever it is saved.

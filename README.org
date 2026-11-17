@@ -61,6 +61,8 @@ With Emacs's built-in =package-vc= (Emacs 30 or later):
 
 Then create a personal API key in Linear (Settings, Security & access, Personal API keys), give it access to the teams you mirror, and make it available to the package ([[#h:api-key][The API key]]).
 
+After an update you need not restart Emacs for the package's keys: each time the package is loaded it sets the keys of its two keymaps, ~org-linear-my-issues-mode-map~ and ~org-linear-file-mode-map~, again, and leaves the keys you bound in them yourself.
+
 * The file
 :PROPERTIES:
 :CUSTOM_ID: h:the-file
