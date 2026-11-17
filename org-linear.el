@@ -308,6 +308,11 @@ Linear refused a write, or a closed issue can leave once its edits are sent.")
 (defvar org-linear--body-overrides nil
   "Hash table from issue ID to the Org body a sync pulls instead of pandoc's.")
 
+(defvar-local org-linear--file nil
+  "The file whose text the current buffer holds without visiting it, or nil.
+The in-place layout reads the files nobody visits in such buffers; see
+`org-linear-in-place--read-buffer'.")
+
 (defvar org-linear--views nil
   "Hash table from issue heading markers to their views, read before applying.
 `org-linear--local-view' takes a heading's view from it once, the first
@@ -2557,11 +2562,12 @@ not sent again while later edits still go through."
 (defun org-linear--fail (format-string &rest args)
   "End the sync with an error described by FORMAT-STRING and ARGS.
 The sync ends even if saving what it linked fails too, or is quit; that
-is logged."
+is logged, and the in-place layout still closes the buffers it read
+files in."
   (let ((text (apply #'format format-string args)))
     (condition-case failure
-        (progn
-          (org-linear--flush-in-place)
+        (unwind-protect
+            (org-linear--flush-in-place)
           (when (eq org-linear-layout 'in-place)
             (org-linear-in-place--after-failure)))
       ((error quit)
@@ -2710,9 +2716,15 @@ place shows, as `org-linear--tree-relations' gives them."
 
 (defun org-linear--file-label-tags ()
   "Return the tag of the current file's label, in a list, in the in-place layout."
-  (when (and (eq org-linear-layout 'in-place) buffer-file-name)
-    (list (org-linear--label-tag
-           `((name . ,(org-linear--file-label-name buffer-file-name)))))))
+  (when-let* ((file (and (eq org-linear-layout 'in-place) (org-linear--buffer-file))))
+    (list (org-linear--label-tag `((name . ,(org-linear--file-label-name file)))))))
+
+(defun org-linear--buffer-file (&optional buffer)
+  "Return the file whose text BUFFER holds, by default the current buffer.
+That is the file it visits or, for a buffer the in-place layout read a
+file in, that file; see `org-linear--file'."
+  (with-current-buffer (or buffer (current-buffer))
+    (or buffer-file-name org-linear--file)))
 
 (defun org-linear--file-label-name (file)
   "Return the name of the Linear label that marks issues from FILE."

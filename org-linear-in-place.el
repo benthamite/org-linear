@@ -51,6 +51,12 @@
 (defconst org-linear-in-place--file-regexp "\\.org\\(?:_archive\\)?\\'"
   "Regexp matching the names of the files the scan reads.")
 
+(defvar-local org-linear-in-place--read nil
+  "What the file read in the current buffer was like when the sync read it.
+A plist, in the buffers of `org-linear-in-place--read-buffer' only: :time
+and :size are the file's modification time and size, nil if it did not
+exist; :hash is the hash of its text and :truename its true name.")
+
 (defvar org-linear-in-place--candidate-cache nil
   "The keywords and hierarchy the candidate regexp was built for, and the regexp.
 The car is (KEYWORDS . HIERARCHY): the value of `org-todo-keywords' and
@@ -197,12 +203,13 @@ and :job the indexing in progress."
 the IDs of linked headings in scope to markers; :new lists markers at
 headings in scope that have no issue yet; :pending holds the IDs their
 creation was sent with; :duplicates holds IDs with several headings;
-:buffers lists the buffers the sync may edit and :opened those it
-visited itself; :ticks maps each indexed buffer to its modification
-count then; :read lists the names of the files it indexed; :unfinished
-lists the files holding headings whose creation this sync sends or
-defers, by name, since the sync may close a file and visit it again;
-:skipped maps files to why they are left out.  With a hierarchy, :nodes
+:buffers lists the buffers the sync may edit and :opened those of them
+it made itself to read a file nobody visits, which visit nothing; :ticks
+maps each indexed buffer to its modification count then; :read lists the
+names of the files it indexed; :unfinished lists the files holding
+headings whose creation this sync sends or defers, by name, since their
+headings may be in another buffer by the time they are linked; :skipped
+maps files to why they are left out.  With a hierarchy, :nodes
 lists the nodes of task, project and milestone headings, :node-of maps
 the markers of tasks to their nodes, :objects maps the IDs of linked
 projects, initiatives and milestones to (KIND . NODE), :object-pending
@@ -327,11 +334,14 @@ must look at is queued for indexing."
       (plist-put scanner :index (append (plist-get scanner :index) (list file)))))))
 
 (defun org-linear-in-place--read-file (file buffer mtime)
-  "Return a cache entry for FILE, read from BUFFER if it visits FILE.
-MTIME is FILE's modification time.  Its :uuids include the IDs of
-creations in flight, so that their issues count as present."
+  "Return a cache entry for FILE, read from BUFFER if it holds unsaved edits.
+BUFFER is the buffer visiting FILE, or nil.  Without unsaved edits FILE
+itself is read: the buffer may be behind it, since the sync leaves open
+the buffers it edits and something else may have written the file since.
+MTIME is FILE's modification time.  The entry's :uuids include the IDs
+of creations in flight, so that their issues count as present."
   (with-temp-buffer
-    (if buffer
+    (if (and buffer (buffer-modified-p buffer))
         (org-linear-in-place--insert-whole buffer)
       (insert-file-contents file))
     (goto-char (point-min))
@@ -399,15 +409,29 @@ The line must be in the heading's entry, before the next heading."
   "Headings an indexing step reads before the scan checks the time.")
 
 (defun org-linear-in-place--index-file (file scan)
-  "Visit FILE and add its headings to SCAN at once, unless it cannot be edited now.
-Return its buffer, or nil.  A file already indexed, under whatever name,
-is not indexed again, so that no heading is counted twice."
-  (or (when-let* ((visiting (find-buffer-visiting file)))
-        (car (memq visiting (plist-get scan :buffers))))
+  "Add the headings of FILE to SCAN at once, unless it cannot be edited now.
+Return the buffer that holds them, or nil.  A file already indexed,
+under whatever name, is not indexed again, so that no heading is counted
+twice."
+  (or (org-linear-in-place--indexed-buffer file scan)
       (when-let* ((job (org-linear-in-place--index-job file scan)))
         (while (not (org-linear-in-place--index-headings job scan most-positive-fixnum)))
         (org-linear-in-place--finish-job job scan)
         (plist-get job :buffer))))
+
+(defun org-linear-in-place--indexed-buffer (file scan)
+  "Return the buffer SCAN indexed FILE in, under whatever name, or nil.
+That is a buffer visiting FILE, or one the sync read FILE in."
+  (let ((buffers (plist-get scan :buffers)))
+    (or (car (memq (find-buffer-visiting file) buffers))
+        (let ((truename (file-truename file)))
+          (seq-find (lambda (buffer)
+                      (and (buffer-live-p buffer)
+                           (equal truename
+                                  (plist-get (buffer-local-value 'org-linear-in-place--read
+                                                                 buffer)
+                                             :truename))))
+                    buffers)))))
 
 (defun org-linear-in-place--index-job (file scan)
   "Return the state of indexing FILE into SCAN, a plist, or nil.
@@ -415,8 +439,7 @@ Nil means FILE is not indexed: it is already, under whatever name, or
 its buffer cannot be edited now.  The state holds the :buffer, the
 position to go on from, the buffer's modification count, and what the
 headings read so far added up to."
-  (unless (when-let* ((visiting (find-buffer-visiting file)))
-            (memq visiting (plist-get scan :buffers)))
+  (unless (org-linear-in-place--indexed-buffer file scan)
     (when-let* ((buffer (org-linear-in-place--usable-buffer file scan)))
       (with-current-buffer buffer
         (list :buffer buffer
@@ -496,7 +519,7 @@ HIERARCHY is non-nil when projects and milestones sync."
 The scan cache learns the buffer's IDs and whether it holds headings to
 create."
   (let* ((buffer (plist-get job :buffer))
-         (file (buffer-file-name buffer))
+         (file (org-linear--buffer-file buffer))
          (nodes (nreverse (plist-get job :nodes)))
          (new (plist-get job :new))
          (uuids (plist-get job :uuids)))
@@ -517,9 +540,10 @@ create."
   "Leave the headings of BUFFER out of the sync.
 Their issues stay present, so they are neither inserted again nor
 archived; they sync once the buffer is saved.  Its file is recorded as
-dropped, so that creations from it wait."
+dropped, so that creations from it wait.  A buffer the sync made itself
+to read the file in is killed."
   (let ((scan org-linear--scan))
-    (when-let* ((file (and (buffer-live-p buffer) (buffer-file-name buffer))))
+    (when-let* ((file (and (buffer-live-p buffer) (org-linear--buffer-file buffer))))
       (plist-put scan :dropped (cons file (plist-get scan :dropped))))
     (maphash (lambda (id marker)
                (when (eq (marker-buffer marker) buffer)
@@ -529,12 +553,17 @@ dropped, so that creations from it wait."
                                      (plist-get scan :new)))
     (org-linear-in-place--drop-nodes buffer)
     (plist-put scan :buffers (remq buffer (plist-get scan :buffers)))
-    (plist-put scan :opened (remq buffer (plist-get scan :opened)))))
+    (when (memq buffer (plist-get scan :opened))
+      (plist-put scan :opened (remq buffer (plist-get scan :opened)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (defun org-linear-in-place--usable-buffer (file scan)
-  "Return a buffer visiting FILE that the sync may edit, or nil.
-A buffer with unsaved edits is not; one whose file changed on disk is
-reverted first.  A buffer the sync visits itself is recorded in SCAN."
+  "Return a buffer holding the text of FILE that the sync may work in, or nil.
+A buffer visiting FILE with unsaved edits is not one; one whose file
+changed on disk is reverted first.  A file nobody visits is read in a
+buffer of the sync's own that visits nothing, recorded in SCAN; see
+`org-linear-in-place--read-buffer'."
   (let ((buffer (find-buffer-visiting file)))
     (cond
      ((and buffer (buffer-modified-p buffer))
@@ -547,11 +576,42 @@ reverted first.  A buffer the sync visits itself is recorded in SCAN."
             (revert-buffer t t t))))
       buffer)
      (t
-      (setq buffer (org-linear-in-place--visit file))
-      (with-current-buffer buffer
-        (unless (derived-mode-p 'org-mode) (org-mode)))
+      (setq buffer (org-linear-in-place--read-buffer file))
       (plist-put scan :opened (cons buffer (plist-get scan :opened)))
       buffer))))
+
+(defun org-linear-in-place--read-buffer (file)
+  "Return a new buffer holding the text of FILE, in Org mode, that visits nothing.
+The sync reads the files nobody visits in such buffers.  Nothing finds
+one by its file or comes to point into it, so the sync can kill it when
+done, which it must never do to a buffer that visits a file.  Nobody
+edits in one either, so the hooks that set a buffer up for editing do
+not run, and Org skips what it does to show a file.  File and directory
+local variables are set as a visit sets them, but only the safe ones, so
+that a background sync asks nothing.  A FILE that does not exist yet, as
+a new inbox, gives an empty buffer.  `org-linear--file' holds FILE there,
+and `org-linear-in-place--read' what FILE was like."
+  (let ((buffer (generate-new-buffer
+                 (format " *org-linear %s*" (file-name-nondirectory file)) t))
+        (attributes (file-attributes file)))
+    (with-current-buffer buffer
+      (when attributes
+        (insert-file-contents file))
+      (setq default-directory (file-name-directory (expand-file-name file)))
+      (let ((org-inhibit-startup t)
+            (enable-local-variables (and enable-local-variables :safe))
+            (inhibit-message t))
+        (delay-mode-hooks (org-mode))
+        (with-demoted-errors "Error in the local variables of an Org file: %S"
+          (hack-local-variables 'no-mode)))
+      (setq org-linear--file file
+            org-linear-in-place--read
+            (list :time (file-attribute-modification-time attributes)
+                  :size (file-attribute-size attributes)
+                  :hash (buffer-hash)
+                  :truename (file-truename file)))
+      (set-buffer-modified-p nil))
+    buffer))
 
 (defun org-linear-in-place--index-task (uuid pending keyword node scan)
   "Add the task heading at point to SCAN; return non-nil if it has no issue.
@@ -655,7 +715,8 @@ The first sync takes every open issue."
   "Create the file labels that indexed headings need and Linear lacks.
 Then call CALLBACK."
   (let* ((names (delete-dups
-                 (mapcar (lambda (buffer) (org-linear--file-label-name (buffer-file-name buffer)))
+                 (mapcar (lambda (buffer)
+                           (org-linear--file-label-name (org-linear--buffer-file buffer)))
                          (plist-get org-linear--scan :buffers))))
          (known (mapcar (lambda (label) (alist-get 'name label)) (plist-get org-linear--meta :labels)))
          (missing (seq-remove (lambda (name) (member name known)) names)))
@@ -859,7 +920,9 @@ runs units as sync edits for `org-linear-in-place--slice' seconds, and
 at least one, and the next starts on a timer, so that Emacs handles
 input in between.  A buffer edited since the sync last touched it
 leaves the sync before the next slice, so that the sync never edits or
-saves a buffer of yours."
+saves a buffer of yours.  A file the slice edited in a buffer the sync
+read it in is visited before the slice ends, and its edits go on in the
+visiting buffer; see `org-linear-in-place--visit-edited'."
   (let (slice)
     (setq slice
           (org-linear--bound
@@ -874,6 +937,7 @@ saves a buffer of yours."
                                (when (consp more)
                                  (setq units (append more units))))
                              (and units (< (float-time) deadline)))))))
+               (org-linear-in-place--visit-edited)
                (org-linear-in-place--record-ticks)
                (if units
                    (run-with-timer org-linear-in-place--pause nil slice)
@@ -905,18 +969,147 @@ An edit counts whether or not it was saved since: the sync compares each
 buffer's modification count with the one it recorded when it read or
 last edited the buffer, so that its own edits do not count.  Their
 headings stay present, so their issues are neither inserted again nor
-archived; they sync once the buffer is saved."
-  (let* ((scan org-linear--scan)
-         (changed (seq-filter (lambda (buffer)
-                                (or (not (buffer-live-p buffer))
-                                    (not (verify-visited-file-modtime buffer))
-                                    (not (eql (gethash buffer (plist-get scan :ticks))
-                                              (buffer-chars-modified-tick buffer)))))
-                              (plist-get scan :buffers))))
-    (dolist (buffer changed)
-      (org-linear--log "Skipped %s: it changed during the sync"
-                       (if (buffer-live-p buffer) (buffer-name buffer) "a killed buffer"))
-      (org-linear-in-place--forget-buffer buffer))))
+archived; they sync once the buffer is saved.  A file the sync read in a
+buffer of its own, and that someone visited since, goes on in the
+visiting buffer if that one holds what the sync read, and is left out
+otherwise."
+  (org-linear-in-place--move-to-visitors)
+  (mapc #'org-linear-in-place--leave-out
+        (seq-filter #'org-linear-in-place--changed-p (plist-get org-linear--scan :buffers))))
+
+(defun org-linear-in-place--leave-out (buffer)
+  "Leave BUFFER, which changed during the sync, out of it, and log that."
+  (org-linear--log "Skipped %s: it changed during the sync"
+                   (cond ((not (buffer-live-p buffer)) "a killed buffer")
+                         ((memq buffer (plist-get org-linear--scan :opened))
+                          (file-name-nondirectory (org-linear--buffer-file buffer)))
+                         (t (buffer-name buffer))))
+  (org-linear-in-place--forget-buffer buffer))
+
+(defun org-linear-in-place--changed-p (buffer)
+  "Return non-nil if BUFFER no longer holds what the sync read or wrote in it.
+A buffer visiting a file changed if it was edited, or its file written,
+since the sync last touched it.  A buffer the sync read a file in
+changed if the file was written since."
+  (cond
+   ((not (buffer-live-p buffer)) t)
+   ((memq buffer (plist-get org-linear--scan :opened))
+    (not (org-linear-in-place--unchanged-on-disk-p buffer)))
+   (t (or (not (verify-visited-file-modtime buffer))
+          (not (eql (gethash buffer (plist-get org-linear--scan :ticks))
+                    (buffer-chars-modified-tick buffer)))))))
+
+(defun org-linear-in-place--unchanged-on-disk-p (reading)
+  "Return non-nil if the file of READING is as the sync read it.
+READING is a buffer the sync read the file in; the file's modification
+time and size are compared with those it had then."
+  (let ((read (buffer-local-value 'org-linear-in-place--read reading))
+        (attributes (file-attributes (org-linear--buffer-file reading))))
+    (and (equal (file-attribute-modification-time attributes) (plist-get read :time))
+         (equal (file-attribute-size attributes) (plist-get read :size)))))
+
+(defun org-linear-in-place--move-to-visitors ()
+  "Go on in the buffers that by now visit files the sync read itself.
+A file someone visited since the sync read it is edited in the visiting
+buffer from here on, if that buffer holds what the sync read and has no
+unsaved edits; otherwise the file is left out of the sync.  The visiting
+buffers are looked up in one table, built here, as the scan does."
+  (when-let* ((readings (plist-get org-linear--scan :opened))
+              (table (org-linear-in-place--visiting-table)))
+    (dolist (reading (copy-sequence readings))
+      (when-let* ((visiting (and (buffer-live-p reading)
+                                 (org-linear-in-place--visiting-in table reading))))
+        (if (org-linear-in-place--holds-what-was-read-p visiting reading)
+            (org-linear-in-place--hand-over reading visiting)
+          (org-linear-in-place--leave-out reading))))))
+
+(defun org-linear-in-place--visiting-in (table reading)
+  "Return the buffer of TABLE that visits the file READING was read from, or nil.
+TABLE is as `org-linear-in-place--visiting-table' returns it."
+  (or (gethash (cons 'name (expand-file-name (org-linear--buffer-file reading))) table)
+      (gethash (cons 'truename
+                     (abbreviate-file-name
+                      (plist-get (buffer-local-value 'org-linear-in-place--read reading)
+                                 :truename)))
+               table)))
+
+(defun org-linear-in-place--holds-what-was-read-p (visiting reading)
+  "Return non-nil if VISITING holds, saved, the text the sync read in READING.
+VISITING visits the file READING was read from."
+  (and (not (buffer-modified-p visiting))
+       (verify-visited-file-modtime visiting)
+       (equal (buffer-hash visiting)
+              (plist-get (buffer-local-value 'org-linear-in-place--read reading) :hash))))
+
+(defun org-linear-in-place--visit-edited ()
+  "Hand each file the sync edited in a buffer of its own to a buffer visiting it.
+The sync reads the files nobody visits in buffers that visit nothing.
+Once it has edited one, it visits the file as you would, with your
+hooks, gives that buffer the edits and goes on in it; the buffer is
+saved when the sync ends and stays open.  If the file is no longer as
+the sync read it, the edits have nowhere to go; see
+`org-linear-in-place--lose-edits'."
+  (dolist (reading (copy-sequence (plist-get org-linear--scan :opened)))
+    (when (and (buffer-live-p reading) (buffer-modified-p reading))
+      (if-let* ((visiting (org-linear-in-place--visitor reading)))
+          (org-linear-in-place--hand-over reading visiting)
+        (org-linear-in-place--lose-edits reading)))))
+
+(defun org-linear-in-place--visitor (reading)
+  "Return a buffer visiting READING's file that can take the sync's edits, or nil.
+A buffer that visits the file already must hold what the sync read, with
+no unsaved edits.  If nobody visits the file, and it is on disk as the
+sync read it, the sync visits it."
+  (let* ((file (org-linear--buffer-file reading))
+         (visiting (find-buffer-visiting file)))
+    (cond
+     (visiting (and (org-linear-in-place--holds-what-was-read-p visiting reading) visiting))
+     ((org-linear-in-place--unchanged-on-disk-p reading) (org-linear-in-place--visit file)))))
+
+(defun org-linear-in-place--hand-over (reading visiting)
+  "Go on in VISITING with what the sync read, and edited, in READING.
+VISITING visits the file READING was read from.  It takes READING's
+text, as a sync edit, if the two differ; the scan's markers in READING
+move to the same places of VISITING, which takes READING's place among
+the buffers the sync may edit; and READING is killed."
+  (let ((scan org-linear--scan))
+    (with-current-buffer visiting
+      (unless (derived-mode-p 'org-mode) (org-mode))
+      (org-linear--with-sync-edits
+       (lambda () (org-linear-in-place--take-text reading))))
+    (dolist (marker (org-linear-in-place--scan-markers scan))
+      (when (eq (marker-buffer marker) reading)
+        (set-marker marker (marker-position marker) visiting)))
+    (plist-put scan :buffers (cl-substitute visiting reading (plist-get scan :buffers)))
+    (plist-put scan :opened (remq reading (plist-get scan :opened)))
+    (remhash reading (plist-get scan :ticks))
+    (puthash visiting (buffer-chars-modified-tick visiting) (plist-get scan :ticks))
+    (kill-buffer reading)))
+
+(defun org-linear-in-place--take-text (source)
+  "Give the current buffer, widened, the text of the buffer SOURCE.
+The text the two share stays where it is, with the markers in it."
+  (unless (and (= (buffer-size) (buffer-size source))
+               (equal (buffer-hash) (buffer-hash source)))
+    (replace-region-contents (point-min) (point-max) (lambda () source) 1)))
+
+(defun org-linear-in-place--scan-markers (scan)
+  "Return the markers SCAN holds at headings: those of its tasks and of its nodes."
+  (append (hash-table-values (plist-get scan :tasks))
+          (plist-get scan :new)
+          (mapcar (lambda (node) (plist-get node :marker)) (plist-get scan :nodes))))
+
+(defun org-linear-in-place--lose-edits (reading)
+  "End the sync, whose edits to the file of READING cannot reach it.
+The file changed, or a buffer visiting it did, while the sync held edits
+to it in READING.  What the sync recorded of its merge would then say
+Org holds values it does not, and the next sync would send Linear its
+old values back.  So the record is dropped, for the next sync to start
+from the one saved last, and this sync ends as failed."
+  (let ((file (org-linear--buffer-file reading)))
+    (setq org-linear--state nil)
+    (error "%s changed while the sync edited it, so the sync kept nothing; the next one starts afresh"
+           (abbreviate-file-name file))))
 
 (defun org-linear-in-place--with-edits (edit)
   "Call EDIT with the indexed buffers widened, as sync edits.
@@ -1163,7 +1356,7 @@ its heading's place gives it."
                             id)))
              (relations (org-linear-in-place--new-issue-relations marker))
              (op (list :type 'add
-                       :marker (list :file (buffer-file-name (marker-buffer marker))
+                       :marker (list :file (org-linear--buffer-file (marker-buffer marker))
                                      :pending pending :relations relations)
                        :view view :pending pending :relations relations
                        :team (alist-get 'id (car (plist-get org-linear--meta :teams))))))
@@ -1180,7 +1373,7 @@ The next sync reads its file again, whatever the file's text suggests, so
 that a creation that failed before Linear acted on it is sent again.  A
 heading whose creation Linear refused does not count: it waits until it
 changes."
-  (let ((file (buffer-file-name buffer)))
+  (let ((file (org-linear--buffer-file buffer)))
     (unless (member file (plist-get org-linear--scan :unfinished))
       (plist-put org-linear--scan :unfinished
                  (cons file (plist-get org-linear--scan :unfinished))))))
@@ -1211,21 +1404,19 @@ edits is linked by a later sync."
 
 (defun org-linear-in-place--edit-file (file edit)
   "Call EDIT at the start of FILE, widened, as a sync edit.
-The buffer is saved once, when the sync ends; see
-`org-linear-in-place--flush'.  Nothing happens if the buffer has edits
-of its own: unsaved ones before the sync touched it, or any since."
-  (let* ((visiting (find-buffer-visiting file))
-         (buffer (or visiting (org-linear-in-place--visit file)))
+FILE is edited in the buffer that visits it, which the sync opens if
+nobody has, and which stays open.  The buffer is saved once, when the
+sync ends; see `org-linear-in-place--flush'.  Nothing happens if the
+buffer has edits of its own: unsaved ones before the sync touched it, or
+any since."
+  (let* ((buffer (or (find-buffer-visiting file) (org-linear-in-place--visit file)))
          (entry (seq-find (lambda (e) (eq (plist-get e :buffer) buffer))
                           (plist-get org-linear--scan :linked))))
-    (cond
-     ((if entry
-          (/= (plist-get entry :tick) (buffer-chars-modified-tick buffer))
-        (buffer-modified-p buffer))
-      (org-linear--log "Not linked yet: %s has edits of yours; the next sync links it"
-                       (abbreviate-file-name file))
-      (unless (or entry visiting) (kill-buffer buffer)))
-     (t
+    (if (if entry
+            (/= (plist-get entry :tick) (buffer-chars-modified-tick buffer))
+          (buffer-modified-p buffer))
+        (org-linear--log "Not linked yet: %s has edits of yours; the next sync links it"
+                         (abbreviate-file-name file))
       (with-current-buffer buffer
         (unless entry
           (unless (derived-mode-p 'org-mode) (org-mode))
@@ -1236,12 +1427,11 @@ of its own: unsaved ones before the sync touched it, or any since."
       (if entry
           (plist-put entry :tick (buffer-chars-modified-tick buffer))
         (plist-put org-linear--scan :linked
-                   (cons (list :buffer buffer :visited (not visiting)
-                               :tick (buffer-chars-modified-tick buffer))
-                         (plist-get org-linear--scan :linked))))))))
+                   (cons (list :buffer buffer :tick (buffer-chars-modified-tick buffer))
+                         (plist-get org-linear--scan :linked)))))))
 
 (defun org-linear-in-place--flush ()
-  "Save the buffers the sync linked issues in, each once, and close its own.
+  "Save the buffers the sync linked issues in, each once; they stay open.
 A buffer edited by you since the sync's last edit is left unsaved, with
 the sync's edits in it, and the log says so."
   (dolist (entry (plist-get org-linear--scan :linked))
@@ -1251,22 +1441,20 @@ the sync's edits in it, and the log says so."
             (org-linear--log "Not saved: %s has edits of yours; save it to keep the new links"
                              (buffer-name buffer))
           (org-linear--save buffer)
-          (org-linear-in-place--refresh-cache buffer)
-          (when (plist-get entry :visited) (kill-buffer buffer))))))
+          (org-linear-in-place--refresh-cache buffer)))))
   (plist-put org-linear--scan :linked nil))
 
 ;;;; Visiting files
 
 (defun org-linear-in-place--visit (file)
-  "Visit FILE for the sync and return its buffer.
-The sync kills the buffer when done, so the hooks that set up a buffer
-for editing, version control included, are skipped: a first import
-visits a hundred files or more."
-  (let ((inhibit-message t)
-        (delay-mode-hooks t)
-        (find-file-hook nil)
-        (vc-handled-backends nil))
-    (find-file-noselect file)))
+  "Visit FILE as you would, for the sync to edit it, and return its buffer.
+The buffer is set up by your own hooks and stays open when the sync is
+done.  The sync used to visit files without hooks and kill their buffers
+afterwards; but another package may come to point into a buffer that
+visits a file, and would be left pointing nowhere, or would take over a
+buffer your hooks never set up."
+  (let ((inhibit-message t))
+    (find-file-noselect file t)))
 
 ;;;; The inbox
 
@@ -1297,7 +1485,8 @@ The edits give the issue the inbox file's label."
           (setq base (org-linear--insert-comments marker comments base))
           (puthash (alist-get 'id task) base (org-linear--state-tasks))
           (puthash (alist-get 'id task) marker (plist-get org-linear--scan :tasks))
-          (puthash (alist-get 'id task) buffer-file-name (plist-get org-linear--scan :present))
+          (puthash (alist-get 'id task) (org-linear--buffer-file)
+                   (plist-get org-linear--scan :present))
           (org-linear--count :pulled)
           (org-linear--merge task converted nil nil nil marker base)))
     (org-linear--log "Not added: %s; set `org-linear-inbox-file', or save it"
@@ -1325,24 +1514,49 @@ Add the heading at the end if it is missing."
 ;;;; Saving
 
 (defun org-linear-in-place--save-buffers ()
-  "Save the buffers the sync edited and kill those it visited itself.
-The scan cache learns the saved files afresh; of the others, which did
-not change, it learns only whether they still hold headings to create."
+  "Save the buffers the sync edited and close those it read files in.
+The buffers that visit a file stay open.  The scan cache learns the
+saved files afresh; of the others, which did not change, it learns only
+whether they still hold headings to create."
+  (org-linear-in-place--visit-edited)
   (dolist (buffer (plist-get org-linear--scan :buffers))
     (when (buffer-live-p buffer)
       (if (buffer-modified-p buffer)
           (progn
             (org-linear--save buffer)
             (org-linear-in-place--refresh-cache buffer))
-        (org-linear-in-place--refresh-new (buffer-file-name buffer)))))
-  (dolist (buffer (plist-get org-linear--scan :opened))
-    (when (and (buffer-live-p buffer) (not (buffer-modified-p buffer)))
-      (kill-buffer buffer))))
+        (org-linear-in-place--refresh-new (org-linear--buffer-file buffer)))))
+  (org-linear-in-place--close-reading-buffers))
+
+(defun org-linear-in-place--close-reading-buffers ()
+  "Kill the buffers the sync read files in, which nothing else can point into.
+One that still holds edits of the sync, as when the sync fails while it
+applies Linear's changes, first hands them to a buffer visiting its file,
+where they stay unsaved, as the edits of such a sync do in the files you
+visit.  If it cannot, the sync's record is dropped, as
+`org-linear-in-place--lose-edits' explains."
+  (let ((scan org-linear--scan)
+        (handed nil))
+    (unwind-protect
+        (progn
+          (when org-linear--state
+            (org-linear-in-place--visit-edited))
+          (setq handed t))
+      (unless handed
+        (setq org-linear--state nil))
+      (dolist (reading (plist-get scan :opened))
+        (when (buffer-live-p reading)
+          (kill-buffer reading)))
+      (plist-put scan :opened nil)
+      (plist-put scan :buffers (seq-filter #'buffer-live-p (plist-get scan :buffers))))))
 
 (defun org-linear-in-place--after-failure ()
-  "Mark the files this sync read to be read again by the next sync.
+  "Close the buffers this sync read files in and mark its files to be read again.
 A sync that failed may not have sent their edits, and the next sync
-would otherwise take the files for unchanged.  The state is saved."
+would otherwise take the files for unchanged.  The state is saved,
+unless the sync dropped it."
+  (when org-linear--scan
+    (org-linear-in-place--close-reading-buffers))
   (when (and org-linear--state org-linear--scan)
     (let ((cache (org-linear-in-place--cache)))
       (dolist (file (plist-get org-linear--scan :read))
@@ -1357,7 +1571,7 @@ marked to be read again by the next sync: the sync just read it, and the
 text alone cannot tell a heading waiting for its creation from one left
 out for a reason, by a tag, as a habit, or as an initiative while
 initiatives are turned off."
-  (let* ((file (buffer-file-name buffer))
+  (let* ((file (org-linear--buffer-file buffer))
          (entry (org-linear-in-place--read-file
                  file buffer (file-attribute-modification-time (file-attributes file)))))
     (puthash file entry (org-linear-in-place--cache))
@@ -2168,7 +2382,8 @@ A milestone needs a project heading above it with a project."
           nil)
       (list :type 'object-add :kind kind :view view :relations relations :pending pending
             :team (alist-get 'id (car (plist-get org-linear--meta :teams)))
-            :place (list :file (buffer-file-name (marker-buffer marker)) :pending pending)))))
+            :place (list :file (org-linear--buffer-file (marker-buffer marker))
+                         :pending pending)))))
 
 ;;;; The hierarchy: sending edits
 
@@ -2490,8 +2705,9 @@ Either can be nil, for none.  REFUSED handles an error."
 ;;;###autoload
 (defun org-linear-preview (&optional profile)
   "Show what the next in-place sync of PROFILE would create and skip.
-Nothing is sent to Linear and no file is changed; the files the scan
-visits are closed again.  Interactively, PROFILE is the current buffer's,
+Nothing is sent to Linear, no file is changed and none is visited: the
+scan reads the files nobody visits in buffers of its own, which are
+killed again.  Interactively, PROFILE is the current buffer's,
 or the one you choose with a prefix argument."
   (interactive (list (if current-prefix-arg
                          (org-linear--read-profile)
@@ -2504,13 +2720,14 @@ or the one you choose with a prefix argument."
            (by-file (make-hash-table :test #'equal)))
       (dolist (marker (plist-get scan :new))
         (push (org-with-point-at marker (org-get-heading t t t t))
-              (gethash (buffer-file-name (marker-buffer marker)) by-file)))
+              (gethash (org-linear--buffer-file (marker-buffer marker)) by-file)))
       (dolist (node (plist-get scan :nodes))
         (when-let* ((kinds (org-linear-in-place--missing-objects node)))
           (push (format "%s (%s)"
                         (org-with-point-at (plist-get node :marker) (org-get-heading t t t t))
                         (mapconcat #'symbol-name kinds " and "))
-                (gethash (buffer-file-name (marker-buffer (plist-get node :marker))) by-file))))
+                (gethash (org-linear--buffer-file (marker-buffer (plist-get node :marker)))
+                         by-file))))
       (with-current-buffer (get-buffer-create "*org-linear preview*")
         (let ((inhibit-read-only t))
           (erase-buffer)
@@ -2533,7 +2750,7 @@ or the one you choose with a prefix argument."
           (goto-char (point-min))
           (special-mode))
         (dolist (buffer (plist-get scan :opened))
-          (when (and (buffer-live-p buffer) (not (buffer-modified-p buffer)))
+          (when (buffer-live-p buffer)
             (kill-buffer buffer)))
         (pop-to-buffer (current-buffer))))))
 

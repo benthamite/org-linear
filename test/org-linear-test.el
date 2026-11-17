@@ -1330,7 +1330,8 @@ Each mirrors it into its own file, and the default profile has no teams."
       (org-linear-test--sync))
     (should-not org-linear--busy)
     (should (string-match-p "Boom" (org-linear-test--log)))
-    (should (string-match-p "Flush broke" (org-linear-test--log)))))
+    (should (string-match-p "Flush broke" (org-linear-test--log)))
+    (should-not (org-linear-test--reading-buffers))))
 
 (ert-deftest org-linear-test-callback-error-ends-its-profile-sync ()
   "An error in a callback of a profile's sync ends that profile's sync."
@@ -2215,7 +2216,9 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
              (when (and (buffer-file-name buffer)
                         (string-prefix-p org-linear-test--notes (buffer-file-name buffer)))
                (with-current-buffer buffer (set-buffer-modified-p nil))
-               (kill-buffer buffer))))))))
+               (kill-buffer buffer)))
+           ;; A buffer a sync still running read a file in.
+           (mapc #'kill-buffer (org-linear-test--reading-buffers)))))))
 
 (defun org-linear-test--note (name)
   "Return the text of note file NAME on disk."
@@ -2266,9 +2269,13 @@ FILES is an alist of (NAME . TEXT).  The fake board is the usual one."
       (should (string-match-p "^\\*\\* TODO Peter's task" inbox))
       (should-not (string-match-p "Closed" inbox))
       (should-not (string-match-p ":pablo:" inbox)))
-    (should-not (seq-filter (lambda (b) (and (buffer-file-name b)
-                                             (string-prefix-p org-linear-test--notes (buffer-file-name b))))
-                            (buffer-list)))))
+    ;; The files the sync edited stay open, saved, in the buffers that visit
+    ;; them, and the buffers it read files in are gone.
+    (dolist (name '("health.org" "inbox.org"))
+      (let ((buffer (find-buffer-visiting (expand-file-name name org-linear-test--notes))))
+        (should buffer)
+        (should-not (buffer-modified-p buffer))))
+    (should-not (org-linear-test--reading-buffers))))
 
 (ert-deftest org-linear-test-in-place-assigns-new-issues ()
   "With the option set, an issue created from a heading is assigned to the viewer."
@@ -2860,7 +2867,9 @@ own callbacks."
                      (insert (org-linear-test--note "work.org"))
                      (how-many "^:LINEAR_UUID:" (point-min) (point-max)))))
       (should-not (string-match-p "PENDING" (org-linear-test--note "work.org")))
-      (should-not (find-buffer-visiting (expand-file-name "work.org" org-linear-test--notes))))))
+      ;; The buffer the sync edited the file in stays, saved.
+      (should-not (buffer-modified-p
+                   (find-buffer-visiting (expand-file-name "work.org" org-linear-test--notes)))))))
 
 (ert-deftest org-linear-test-in-place-backlog-in-unchanged-file ()
   "Headings left for later syncs are created even if their file does not change."
@@ -3977,6 +3986,169 @@ Linear (17 Nov 2026)."
       (should-not (alist-get 'archived (gethash id org-linear-test--issues)))
       (with-current-buffer buffer
         (should (buffer-narrowed-p))))))
+
+(defun org-linear-test--reading-buffers ()
+  "Return the live buffers the in-place layout read a file in without visiting it."
+  (seq-filter (lambda (buffer) (local-variable-p 'org-linear--file buffer)) (buffer-list)))
+
+(defun org-linear-test--close-notes ()
+  "Kill the buffers visiting the note files, as you do when done with them."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-file-name buffer)
+               (string-prefix-p org-linear-test--notes (buffer-file-name buffer)))
+      (kill-buffer buffer))))
+
+(defun org-linear-test--sync-to-its-end ()
+  "Run a sync that may fail, and wait until it ends."
+  (org-linear-sync)
+  (let ((deadline (+ (float-time) 30)))
+    (while (and org-linear--busy (< (float-time) deadline))
+      (accept-process-output nil 0.05)))
+  (should-not org-linear--busy))
+
+(ert-deftest org-linear-test-in-place-edits-in-visiting-buffers-it-leaves-open ()
+  "The sync edits a file nobody visits in a buffer your hooks set up, and leaves it.
+It visited such a file without hooks and killed the buffer when done, so
+whatever had come to point into it meanwhile, as an agenda built during
+the sync does, was left pointing nowhere (17 Nov 2026)."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (let* ((file (expand-file-name "health.org" org-linear-test--notes))
+           (set-up nil)
+           (killed nil)
+           (org-mode-hook (list (lambda () (when buffer-file-name (push buffer-file-name set-up)))))
+           (kill-buffer-hook (list (lambda () (when buffer-file-name (push buffer-file-name killed))))))
+      (org-linear-test--sync)
+      (let ((buffer (find-buffer-visiting file)))
+        (should buffer)
+        (should (member file set-up))
+        (should-not killed)
+        (should-not (buffer-modified-p buffer))
+        (should (equal (with-current-buffer buffer
+                         (buffer-substring-no-properties (point-min) (point-max)))
+                       (org-linear-test--note "health.org")))
+        (should (org-linear-test--uuid-of "health.org" "Book dentist")))
+      (should-not (org-linear-test--reading-buffers)))))
+
+(ert-deftest org-linear-test-in-place-reads-without-visiting ()
+  "The sync reads a file nobody visits in a buffer that visits nothing.
+A buffer visiting it, made without your hooks, was there for anything
+that looked the file up while the sync ran (17 Nov 2026)."
+  (org-linear-test--with-notes '(("work.org" . "* TODO Write report\n"))
+    (org-linear-test--sync)
+    (org-linear-test--close-notes)
+    (let ((file (expand-file-name "work.org" org-linear-test--notes))
+          (id (alist-get 'id (org-linear-test--issue-titled "Write report")))
+          (visiting 'not-asked))
+      ;; An edit made elsewhere: the sync has to read it and send it, and
+      ;; has nothing to write to the file.
+      (org-linear-test--write-note
+       "work.org" (replace-regexp-in-string "Write report" "Write the report"
+                                            (org-linear-test--note "work.org")))
+      (cl-letf (((symbol-function 'org-linear-in-place--fetch)
+                 (let ((fetch (symbol-function 'org-linear-in-place--fetch)))
+                   (lambda (callback)
+                     ;; By now the scan has read the file.
+                     (setq visiting (find-buffer-visiting file))
+                     (funcall fetch callback)))))
+        (org-linear-test--sync))
+      (should-not visiting)
+      (should (equal (alist-get 'title (gethash id org-linear-test--issues)) "Write the report"))
+      (should-not (find-buffer-visiting file))
+      (should-not (org-linear-test--reading-buffers)))))
+
+(ert-deftest org-linear-test-in-place-file-visited-during-sync-is-edited-there ()
+  "A file you visit while the sync runs takes the sync's edits in your buffer.
+The buffer was the sync's own, which it killed when done (17 Nov 2026)."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (org-linear-test--close-notes)
+    (let ((file (expand-file-name "health.org" org-linear-test--notes))
+          (id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          buffer)
+      (org-linear-test--edit id 'title "Changed in Linear")
+      (cl-letf (((symbol-function 'org-linear-in-place--ensure-labels)
+                 (let ((ensure (symbol-function 'org-linear-in-place--ensure-labels)))
+                   (lambda (callback)
+                     ;; By now the sync has read the file of the changed issue.
+                     (setq buffer (find-file-noselect file))
+                     (funcall ensure callback)))))
+        (org-linear-test--sync))
+      (should (buffer-live-p buffer))
+      (should (eq buffer (find-buffer-visiting file)))
+      (should-not (buffer-modified-p buffer))
+      (should (string-match-p "TODO Changed in Linear" (with-current-buffer buffer (buffer-string))))
+      (should (string-match-p "TODO Changed in Linear" (org-linear-test--note "health.org")))
+      (should-not (org-linear-test--reading-buffers)))))
+
+(ert-deftest org-linear-test-in-place-file-edited-by-you-during-sync-left-out ()
+  "A file you visit and edit while the sync runs is left out of that sync."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (org-linear-test--close-notes)
+    (let ((file (expand-file-name "health.org" org-linear-test--notes))
+          (id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          buffer)
+      (org-linear-test--edit id 'title "Changed in Linear")
+      (cl-letf (((symbol-function 'org-linear-in-place--ensure-labels)
+                 (let ((ensure (symbol-function 'org-linear-in-place--ensure-labels)))
+                   (lambda (callback)
+                     (setq buffer (find-file-noselect file))
+                     (with-current-buffer buffer
+                       (goto-char (point-max))
+                       (insert "Mine.\n"))
+                     (funcall ensure callback)))))
+        (org-linear-test--sync))
+      (should (string-match-p "changed during the sync" (org-linear-test--log)))
+      (with-current-buffer buffer
+        (should (buffer-modified-p))
+        (should (string-match-p "Mine\\.\n\\'" (buffer-string)))
+        (should-not (string-match-p "Changed in Linear" (buffer-string)))
+        (save-buffer))
+      (should-not (org-linear-test--reading-buffers))
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Changed in Linear" (org-linear-test--note "health.org")))
+      (should (equal (alist-get 'title (gethash id org-linear-test--issues)) "Changed in Linear")))))
+
+(ert-deftest org-linear-test-in-place-file-changed-under-the-sync-keeps-nothing ()
+  "A file that changes while the sync holds edits to it makes the sync keep nothing.
+The edits cannot reach the file, and a record saying they did would make
+the next sync send Linear its old values back."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (org-linear-test--close-notes)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          (written nil))
+      (org-linear-test--edit id 'title "Changed in Linear")
+      (cl-letf (((symbol-function 'org-linear-in-place--visit-edited)
+                 (let ((visit (symbol-function 'org-linear-in-place--visit-edited)))
+                   (lambda ()
+                     (when (and (not written)
+                                (seq-some #'buffer-modified-p (org-linear-test--reading-buffers)))
+                       (setq written t)
+                       (org-linear-test--write-note
+                        "health.org" (concat (org-linear-test--note "health.org")
+                                             "** TODO Added elsewhere\n")))
+                     (funcall visit)))))
+        (org-linear-test--sync-to-its-end))
+      (should written)
+      (should (string-match-p "changed while the sync edited it" (org-linear-test--log)))
+      (should (string-match-p "Added elsewhere" (org-linear-test--note "health.org")))
+      (should-not (string-match-p "Changed in Linear" (org-linear-test--note "health.org")))
+      (should-not (org-linear-test--reading-buffers))
+      (org-linear-test--sync)
+      (should (string-match-p "TODO Changed in Linear" (org-linear-test--note "health.org")))
+      (should (equal (alist-get 'title (gethash id org-linear-test--issues)) "Changed in Linear"))
+      (should (org-linear-test--issue-titled "Added elsewhere")))))
+
+(ert-deftest org-linear-test-in-place-failed-sync-leaves-no-buffer-of-its-own ()
+  "A sync that fails leaves behind no buffer it made to read a file.
+It left the file visited, without your hooks (17 Nov 2026)."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (setq org-linear-test--fail-next "OrgLinearIssues")
+    (org-linear-test--sync-to-its-end)
+    (should (string-match-p "Error" (org-linear-test--log)))
+    (should-not (find-buffer-visiting (expand-file-name "health.org" org-linear-test--notes)))
+    (should-not (org-linear-test--reading-buffers))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
