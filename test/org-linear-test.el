@@ -4235,5 +4235,27 @@ failed (17 Nov 2026)."
         (accept-process-output nil 0.05)))
     (should (eql result 0))))
 
+(ert-deftest org-linear-test-in-place-cache-of-narrowed-reads-is-dropped ()
+  "A scan cache written while narrowed buffers were read in part is dropped.
+Its entries may lack the IDs of the headings that were outside a
+narrowing; their issues would go on counting as gone from Org for as
+long as their files did not change (17 Nov 2026)."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let* ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+           (file (expand-file-name "health.org" org-linear-test--notes))
+           (entry (gethash file (plist-get org-linear--state :files))))
+      (should (member id (plist-get entry :uuids)))
+      ;; As version 2 of the cache left the entry of a file it read in a
+      ;; buffer narrowed to a subtree without the heading.
+      (plist-put entry :uuids nil)
+      (plist-put entry :candidates nil)
+      (plist-put org-linear--state :scope-key
+                 (let ((org-linear-in-place--cache-version 2))
+                   (org-linear-in-place--scope-key)))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearArchive"))
+      (should-not (alist-get 'archived (gethash id org-linear-test--issues))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

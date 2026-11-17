@@ -290,8 +290,10 @@ dropped when the options that decide the scope change."
       (plist-put org-linear--state :files (make-hash-table :test #'equal)))
     (plist-get org-linear--state :files)))
 
-(defconst org-linear-in-place--cache-version 2
-  "Version of the scan cache's entries; a new one makes the scan read again.")
+(defconst org-linear-in-place--cache-version 3
+  "Version of the scan cache's entries; a new one makes the scan read again.
+Version 3 drops the entries that version 2 wrote from a buffer narrowed
+to a subtree: they lack the IDs of the headings outside it.")
 
 (defun org-linear-in-place--scope-key ()
   "Return a value that changes when an option deciding the scope changes.
