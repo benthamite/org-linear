@@ -3790,5 +3790,31 @@ nothing is sent for it."
   (should (equal (org-linear--shift-levels "*** A\n**** B\n" -1 '((m . 6)))
                  '("** A\n*** B\n" (m . 5)))))
 
+(ert-deftest org-linear-test-read-in-slices-indexes-a-narrowed-buffer-from-its-start ()
+  "A sync that starts while the mirror is narrowed still sees every issue.
+The index used to start at the narrowed region, so each issue above it
+was taken for missing and inserted a second time (17 Nov 2026)."
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Project\n:PROPERTIES:\n:LINEAR_PROJECT: p1\n:END:\n"
+            "** TODO Above\n:PROPERTIES:\n:LINEAR_UUID: u-above\n:END:\n"
+            "** TODO Inside\n:PROPERTIES:\n:LINEAR_UUID: u-inside\n:END:\nBody.\n")
+    (set-buffer-modified-p nil)
+    (goto-char (point-min))
+    (search-forward "** TODO Inside")
+    (org-narrow-to-subtree)
+    (let (index)
+      (cl-letf (((symbol-function 'org-linear-in-place--run-slices)
+                 (lambda (step done)
+                   (while (funcall step))
+                   (funcall done))))
+        (org-linear--read-in-slices (current-buffer) nil (make-hash-table :test #'equal)
+                                    (lambda (found &rest _) (setq index found))))
+      (should index)
+      (should (gethash "u-above" (plist-get index :tasks)))
+      (should (gethash "u-inside" (plist-get index :tasks)))
+      (should (gethash "p1" (plist-get index :projects)))
+      (should (buffer-narrowed-p)))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

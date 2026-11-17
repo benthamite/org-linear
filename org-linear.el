@@ -1689,7 +1689,11 @@ so and the next sync starts afresh.  CONVERTED maps conversion keys to
 Org text."
   (require 'org-linear-in-place)
   (let* ((tick (buffer-chars-modified-tick buffer))
-         (job (with-current-buffer buffer (org-linear--index-job)))
+         ;; Widened: the index starts at the beginning of the file, not of a
+         ;; narrowed region, or every issue above it is taken for missing
+         ;; and inserted a second time.
+         (job (with-current-buffer buffer
+                (org-with-wide-buffer (org-linear--index-job))))
          (comments (org-linear--comments-by-issue data converted))
          (tasks (alist-get 'tasks data))
          (quiet (make-hash-table :test #'equal))
