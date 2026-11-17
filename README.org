@@ -328,7 +328,7 @@ The key reaches =curl= on its standard input, never on its command line, where o
 #+end_src
 
 #+vindex: org-linear-priorities
-~org-linear-priorities~ maps Linear's priorities, 1 (urgent) to 4 (low), to Org cookies; it is =A= to =D= by default. Linear's "no priority" is no cookie. A cookie not listed is sent as the priority of the nearest listed cookie above it, so with numeric priorities you can map only some numbers:
+~org-linear-priorities~ maps Linear's priorities, 1 (urgent) to 4 (low), to Org cookies; it is =A= to =D= by default. Linear's "no priority" is no cookie. A cookie not listed is sent as the priority of the nearest listed cookie above it, and the heading keeps that cookie while its issue keeps that priority, in both layouts: with the mapping below, =[#9]= is sent as priority 4 and stays =[#9]=, and only a priority changed in Linear replaces it. So with numeric priorities you can map only some numbers:
 
 #+begin_src emacs-lisp
 (setq org-linear-priorities '((1 . "1") (2 . "2") (3 . "4") (4 . "6")))

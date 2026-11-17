@@ -144,7 +144,8 @@ that maps to it, in Linear's order of state types and positions."
   '((1 . "A") (2 . "B") (3 . "C") (4 . "D"))
   "Linear priorities (1 urgent, 2 high, 3 medium, 4 low) and their Org cookies.
 Linear's \"no priority\" is no cookie.  A cookie not listed here is sent
-as the priority of the nearest listed cookie above it."
+as the priority of the nearest listed cookie above it, and the heading
+keeps it while its issue keeps that priority."
   :type '(alist :key-type integer :value-type string)
   :group 'org-linear)
 
@@ -2620,11 +2621,14 @@ A milestone the sync did not fetch, which the file cannot show, is
 
 (defun org-linear--remote-cookie (task base)
   "Return the priority cookie that stands for TASK's priority.
-In the in-place layout several cookies can stand for one priority, so the
-cookie of BASE is kept while it is still sent as that priority."
+Several cookies can stand for one priority, since a cookie that
+`org-linear-priorities' does not list is sent as a listed one's.  So the
+cookie of BASE, the heading's own at the last sync, is kept while it is
+still sent as that priority: otherwise a heading written with such a
+cookie would have it replaced by the listed one."
   (let ((cookie (cdr (assq (alist-get 'priority task) org-linear-priorities)))
         (old (plist-get base :priority)))
-    (if (and (eq org-linear-layout 'in-place) old (not (equal old cookie))
+    (if (and old (not (equal old cookie))
              (eql (org-linear--cookie-priority old) (alist-get 'priority task)))
         old
       cookie)))

@@ -430,7 +430,7 @@ The key reaches @samp{curl} on its standard input@comma{} never on its command l
 @end lisp
 
 @vindex org-linear-priorities
-@code{org-linear-priorities} maps Linear's priorities@comma{} 1 (urgent) to 4 (low)@comma{} to Org cookies; it is @samp{A} to @samp{D} by default. Linear's ``no priority'' is no cookie. A cookie not listed is sent as the priority of the nearest listed cookie above it@comma{} so with numeric priorities you can map only some numbers:
+@code{org-linear-priorities} maps Linear's priorities@comma{} 1 (urgent) to 4 (low)@comma{} to Org cookies; it is @samp{A} to @samp{D} by default. Linear's ``no priority'' is no cookie. A cookie not listed is sent as the priority of the nearest listed cookie above it@comma{} and the heading keeps that cookie while its issue keeps that priority@comma{} in both layouts: with the mapping below@comma{} @samp{[#9]} is sent as priority 4 and stays @samp{[#9]}@comma{} and only a priority changed in Linear replaces it. So with numeric priorities you can map only some numbers:
 
 @lisp
 (setq org-linear-priorities '((1 . "1") (2 . "2") (3 . "4") (4 . "6")))

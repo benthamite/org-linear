@@ -3816,5 +3816,41 @@ was taken for missing and inserted a second time (17 Nov 2026)."
       (should (gethash "p1" (plist-get index :projects)))
       (should (buffer-narrowed-p)))))
 
+;;;; Audit of 17 Nov 2026
+
+(defconst org-linear-test--numeric-header
+  "#+TITLE: Linear\n#+PRIORITIES: 1 9 5\n#+TODO: TRIAGE(r) BACKLOG(b) TODO(t) DOING(g) WAITING(w@) | DONE(d) CANCELLED(c@)\n"
+  "A header for a mirrored file whose priorities are the numbers 1 to 9.")
+
+(ert-deftest org-linear-test-mirror-cookie-of-same-priority-kept ()
+  "In the mirror layout too, a cookie sent as another's priority is not replaced.
+A heading another package wrote with `[#9]' was sent as priority 4 and
+came back as `[#6]', the cookie that names that priority (17 Nov 2026)."
+  (org-linear-test--with-board
+    (let ((org-linear-priorities '((1 . "1") (2 . "2") (3 . "4") (4 . "6")))
+          (org-linear-file-header org-linear-test--numeric-header))
+      (org-linear-test--sync)
+      (with-current-buffer (find-buffer-visiting org-linear-file)
+        (goto-char (point-min))
+        (re-search-forward "^\\* Project A")
+        (org-end-of-subtree t t)
+        (insert "** TODO [#9] Stranger's task\n")
+        (org-linear-test--goto "ENG-1")
+        (org-linear--set-priority "3")
+        (save-buffer))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'priority (org-linear-test--issue-titled "Stranger's task")) 4))
+      (should (equal (alist-get 'priority (gethash "i1" org-linear-test--issues)) 2))
+      (org-linear-test--sync)
+      (org-linear-test--sync)
+      (should-not (org-linear-test--writes))
+      (let ((text (org-linear-test--text)))
+        (should (string-match-p "^\\*\\* TODO \\[#9\\] Stranger's task" text))
+        (should (string-match-p "^\\*\\* TODO \\[#3\\] Task one" text)))
+      ;; A priority changed in Linear still replaces the cookie.
+      (org-linear-test--edit "i1" 'priority 1)
+      (org-linear-test--sync)
+      (should (string-match-p "^\\*\\* TODO \\[#1\\] Task one" (org-linear-test--text))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
