@@ -197,6 +197,8 @@ Each issue's workflow state becomes a TODO keyword. By default the keyword depen
 
 When you change a keyword in the file@comma{} the sync sends it as the state @code{org-linear-keyword-states} names for it@comma{} or else as the first state of the issue's team that maps to that keyword@comma{} in Linear's order of state types and positions.
 
+An issue closed in Linear gets a @samp{CLOSED} line with the time Linear closed it@comma{} in your time zone and to the minute@comma{} as Org writes one when you close a heading yourself (to the day when @code{org-log-done-with-time} is @samp{nil}). This holds in both layouts.
+
 The file's own @samp{#+TODO} line@comma{} written from @code{org-linear-file-header} when the file is created@comma{} must list every keyword these options can produce. The default header marks @samp{CANCELLED} with @samp{@@}@comma{} so Org asks for a note when you cancel an issue; the sync posts that note as a comment@comma{} which records why the issue was dropped.
 
 @node Working with issues

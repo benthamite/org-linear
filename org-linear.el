@@ -2889,7 +2889,7 @@ project headings."
            (:title (org-edit-headline value))
            (:todo (if (eq org-linear-layout 'in-place)
                       (org-linear-in-place--set-todo value task)
-                    (org-linear--set-todo value (alist-get 'completed task))))
+                    (org-linear--set-todo value (alist-get 'closed_at task))))
            (:priority (org-linear--set-priority value))
            (:tags (org-set-tags (append (seq-remove #'org-linear--file-label-tag-p value)
                                         (seq-remove
@@ -2899,9 +2899,12 @@ project headings."
            (:scheduled (org-linear--set-planning 'scheduled value))
            (:body (org-linear--set-body value)))))))
 
-(defun org-linear--set-todo (keyword completed)
+(defun org-linear--set-todo (keyword closed-at)
   "Set the heading at point's TODO KEYWORD without logging or hooks.
-COMPLETED is the date the issue was closed, for the CLOSED line."
+CLOSED-AT is when the issue was closed, a time as Linear gives it, or
+nil.  The CLOSED line of a done KEYWORD says that time, in local time
+and to the minute (to the day when `org-log-done-with-time' is nil), so
+that the closing can be placed among the other events of its day."
   (let ((org-inhibit-logging t)
         (org-log-done nil)
         (org-todo-log-states nil)
@@ -2910,8 +2913,8 @@ COMPLETED is the date the issue was closed, for the CLOSED line."
         (org-blocker-hook nil)
         (org-enforce-todo-dependencies nil))
     (org-todo keyword)
-    (if (and completed (member keyword org-done-keywords))
-        (org-add-planning-info 'closed (date-to-time (concat completed "T12:00:00")))
+    (if (and closed-at (member keyword org-done-keywords))
+        (org-add-planning-info 'closed (date-to-time closed-at))
       (org-add-planning-info nil nil 'closed))))
 
 (defun org-linear--set-planning (kind date)
@@ -2964,7 +2967,7 @@ PROJECTS and INDEX locate the project heading."
          (pos (org-linear--project-end (plist-get view :project) projects index))
          marker)
     (goto-char pos)
-    (insert (org-linear--heading-string view (alist-get 'completed task)))
+    (insert (org-linear--heading-string view (alist-get 'closed_at task)))
     (setq marker (org-linear--marker pos))
     (org-with-point-at marker (org-align-tags))
     (org-linear--set-static-properties marker task)
@@ -2981,16 +2984,15 @@ PROJECTS and INDEX locate the project heading."
           (org-linear--want marker field (plist-get view field)))))
     (org-linear--count :pulled)))
 
-(defun org-linear--heading-string (view completed &optional level)
+(defun org-linear--heading-string (view closed-at &optional level)
   "Return the text of a new heading for the issue VIEW.
-COMPLETED is its closing date, or nil.  LEVEL is the heading's level, 2
-by default."
+CLOSED-AT is when it was closed, a time as Linear gives it, or nil.
+LEVEL is the heading's level, 2 by default."
   (let ((planning (string-join
                    (delq nil
-                         (list (when (and completed (member (plist-get view :todo)
+                         (list (when (and closed-at (member (plist-get view :todo)
                                                             (org-linear--done-keywords)))
-                                 (format-time-string "CLOSED: [%Y-%m-%d %a]"
-                                                     (date-to-time (concat completed "T12:00:00"))))
+                                 (concat "CLOSED: " (org-linear--closed-stamp closed-at)))
                                (when (plist-get view :deadline)
                                  (format "DEADLINE: %s" (org-linear--stamp (plist-get view :deadline))))
                                (when (plist-get view :scheduled)
@@ -3003,6 +3005,13 @@ by default."
             "\n"
             (unless (string-empty-p planning) (concat planning "\n"))
             (unless (string-blank-p (plist-get view :body)) (concat (plist-get view :body) "\n")))))
+
+(defun org-linear--closed-stamp (closed-at)
+  "Return the timestamp of a CLOSED line for CLOSED-AT, a time as Linear gives it.
+It is in local time, with the time of day unless `org-log-done-with-time'
+is nil, as `org-linear--set-todo' writes it."
+  (format-time-string (org-time-stamp-format org-log-done-with-time t)
+                      (date-to-time closed-at)))
 
 (defun org-linear--stamp (date)
   "Return an active Org timestamp for DATE, YYYY-MM-DD."

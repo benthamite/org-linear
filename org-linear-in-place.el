@@ -1046,7 +1046,7 @@ property records the closing it acted on."
   (let ((closed-at (alist-get 'closed_at task)))
     (cond
      ((not (and (member keyword org-done-keywords) (org-get-repeat)))
-      (org-linear--set-todo keyword (alist-get 'completed task)))
+      (org-linear--set-todo keyword closed-at))
      ((equal (org-entry-get nil "LINEAR_REPEATED") closed-at))
      (t
       (org-linear--set-todo keyword nil)
@@ -1280,7 +1280,7 @@ The edits give the issue the inbox file's label."
                                    :edited (alist-get 'last_edited_time task)
                                    :note-keys nil :comment-ids nil))))
           (goto-char pos)
-          (insert (org-linear--heading-string view (alist-get 'completed task) level))
+          (insert (org-linear--heading-string view (alist-get 'closed_at task) level))
           (org-linear--set-static-properties marker task)
           (setq base (org-linear--insert-comments marker comments base))
           (puthash (alist-get 'id task) base (org-linear--state-tasks))

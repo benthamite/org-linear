@@ -3852,5 +3852,43 @@ came back as `[#6]', the cookie that names that priority (17 Nov 2026)."
       (org-linear-test--sync)
       (should (string-match-p "^\\*\\* TODO \\[#1\\] Task one" (org-linear-test--text))))))
 
+(defun org-linear-test--closed-stamp (closed-at)
+  "Return the CLOSED timestamp expected for CLOSED-AT, a time as Linear gives it."
+  (format-time-string "[%Y-%m-%d %a %H:%M]" (date-to-time closed-at)))
+
+(ert-deftest org-linear-test-closed-time-is-linears ()
+  "An issue closed in Linear is closed in the file at Linear's own time.
+The CLOSED line said noon of that day, or the day alone on a heading
+that entered the file closed, so nothing could tell a message that came
+after the closing from one that came before it (17 Nov 2026)."
+  (org-linear-test--with-board
+    (let ((org-linear-closed-retention-days 100000)
+          (closed-at "2026-11-10T15:23:45.000Z"))
+      (org-linear-test--sync)
+      (org-linear-test--edit "i1" 'state (org-linear-test--state "s-done"))
+      (org-linear-test--edit "i1" 'completedAt closed-at)
+      (org-linear-test--sync)
+      (org-linear-test--goto "ENG-1")
+      (should (equal (org-get-todo-state) "DONE"))
+      (should (equal (org-entry-get nil "CLOSED") (org-linear-test--closed-stamp closed-at)))
+      ;; A heading that enters the file closed.
+      (org-linear-test--goto "ENG-4")
+      (should (equal (org-entry-get nil "CLOSED")
+                     (org-linear-test--closed-stamp "2026-01-01T10:00:00Z"))))))
+
+(ert-deftest org-linear-test-in-place-closed-time-is-linears ()
+  "In place too, an issue closed in Linear closes its heading at Linear's time."
+  (org-linear-test--with-notes `(("health.org" . ,org-linear-test--health))
+    (org-linear-test--sync)
+    (let ((id (alist-get 'id (org-linear-test--issue-titled "Book dentist")))
+          (closed-at "2026-11-10T15:23:45.000Z"))
+      (org-linear-test--edit id 'state (org-linear-test--state "s-done"))
+      (org-linear-test--edit id 'completedAt closed-at)
+      (org-linear-test--sync)
+      (should (string-match-p
+               (regexp-quote (concat "** DONE Book dentist\nCLOSED: "
+                                     (org-linear-test--closed-stamp closed-at)))
+               (org-linear-test--note "health.org"))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

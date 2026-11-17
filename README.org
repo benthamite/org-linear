@@ -124,6 +124,8 @@ Each issue's workflow state becomes a TODO keyword. By default the keyword depen
 
 When you change a keyword in the file, the sync sends it as the state ~org-linear-keyword-states~ names for it, or else as the first state of the issue's team that maps to that keyword, in Linear's order of state types and positions.
 
+An issue closed in Linear gets a =CLOSED= line with the time Linear closed it, in your time zone and to the minute, as Org writes one when you close a heading yourself (to the day when ~org-log-done-with-time~ is =nil=). This holds in both layouts.
+
 The file's own =#+TODO= line, written from ~org-linear-file-header~ when the file is created, must list every keyword these options can produce. The default header marks =CANCELLED= with =@=, so Org asks for a note when you cancel an issue; the sync posts that note as a comment, which records why the issue was dropped.
 
 ** Working with issues
