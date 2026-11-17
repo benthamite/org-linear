@@ -4200,5 +4200,26 @@ end of the subtree (17 Nov 2026)."
         (should (equal (buffer-substring-no-properties (point-min) (point-max))
                        "* Other\nMine.\nMore."))))))
 
+(ert-deftest org-linear-test-in-place-done-keyword-without-a-state-closes-the-issue ()
+  "A done keyword that no Linear state stands for is sent as a completed state.
+Whether it is a done keyword was asked of the buffer that happened to be
+current when the edit was sent, not of the heading's file, so the issue
+stayed open (17 Nov 2026)."
+  (org-linear-test--with-notes '(("work.org" . "* TODO Fix it\n"))
+    (let ((org-todo-keywords '((sequence "TODO(t)" "WAITING(w)"
+                                         "|" "DONE(d)" "FIXED(f)" "CANCELLED(c)"))))
+      (org-linear-test--sync)
+      (org-linear-test--write-note
+       "work.org" (replace-regexp-in-string "TODO Fix it" "FIXED Fix it"
+                                            (org-linear-test--note "work.org")))
+      (with-temp-buffer
+        (org-linear-test--sync)
+        (should (equal (alist-get 'type (alist-get 'state (org-linear-test--issue-titled "Fix it")))
+                       "completed"))
+        (org-linear-test--sync)
+        (org-linear-test--sync))
+      (should-not (org-linear-test--writes))
+      (should (string-match-p "^\\* FIXED Fix it" (org-linear-test--note "work.org"))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

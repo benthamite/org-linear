@@ -1504,8 +1504,13 @@ and file labels, which stand for no tag of the heading, do not."
       (cdr (assoc type org-linear-type-keywords))
       "TODO"))
 
-(defun org-linear--keyword-state (keyword team-id)
-  "Return the state of team TEAM-ID that KEYWORD is sent as, or nil."
+(defun org-linear--keyword-state (keyword team-id &optional done)
+  "Return the state of team TEAM-ID that KEYWORD is sent as, or nil.
+In the in-place layout a keyword that no state stands for is sent as the
+team's first unstarted state, or as its first completed one if DONE is
+non-nil.  Whether KEYWORD is a done keyword depends on the file of its
+heading, so the caller says: this runs when edits are sent too, in
+whatever buffer is current then."
   (let* ((team (seq-find (lambda (team) (equal (alist-get 'id team) team-id))
                          (plist-get org-linear--meta :teams)))
          (states (sort (copy-sequence (alist-get 'nodes (alist-get 'states team)))
@@ -1524,12 +1529,12 @@ and file labels, which stand for no tag of the heading, do not."
                              keyword))
                     states))
         (and (eq org-linear-layout 'in-place)
-             (org-linear--fallback-state keyword states)))))
+             (org-linear--fallback-state done states)))))
 
-(defun org-linear--fallback-state (keyword states)
-  "Return the first of STATES of the type KEYWORD falls in.
-That is a completed state for a done keyword, an unstarted one otherwise."
-  (let ((type (if (member keyword org-done-keywords) "completed" "unstarted")))
+(defun org-linear--fallback-state (done states)
+  "Return the first of STATES of the type a keyword with no state falls in.
+That is a completed state if DONE is non-nil, an unstarted one otherwise."
+  (let ((type (if done "completed" "unstarted")))
     (seq-find (lambda (state) (equal (alist-get 'type state) type)) states)))
 
 (defun org-linear--cookie-priority (cookie)
@@ -1927,7 +1932,10 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
 `org-linear--apply-task'."
   (let* ((id (alist-get 'id task))
          (base (org-linear--migrate-start-line marker base))
-         (remote (org-linear--remote-view task converted base))
+         ;; In the heading's buffer, whose done keywords the view needs: a
+         ;; slice of the in-place layout runs in whatever buffer is current.
+         (remote (with-current-buffer (marker-buffer marker)
+                   (org-linear--remote-view task converted base)))
          (local (org-linear--local-view marker))
          (base (or base (org-linear--base-from-local local marker)))
          (new-base (copy-sequence base))
@@ -1976,12 +1984,15 @@ CONVERTED, COMMENTS, PROJECTS and INDEX are as in
 (defun org-linear--ops-for (task pushed marker base)
   "Return the edits that send the PUSHED fields and new notes of TASK.
 PUSHED is a list of (FIELD . VALUE).  MARKER is the issue's heading and
-BASE its state."
+BASE its state.  An edit that sends a TODO keyword says, as :done,
+whether it is a done keyword in the heading's file, which is no longer
+at hand when the edit is sent."
   (let ((id (alist-get 'id task))
         ops)
     (when pushed
       (push (list :type 'update :id id :team (alist-get 'team_id task) :fields pushed
-                  :label-ids (alist-get 'label_ids task))
+                  :label-ids (alist-get 'label_ids task)
+                  :done (org-linear--done-keyword-p (cdr (assq :todo pushed)) marker))
             ops))
     (dolist (note (org-linear--local-notes marker))
       (unless (member (org-linear--note-key (cdr note)) (plist-get base :note-keys))
@@ -1994,6 +2005,13 @@ BASE its state."
                                      (plist-get op :type) (alist-get 'identifier task))
                     t))
                 (nreverse ops))))
+
+(defun org-linear--done-keyword-p (keyword marker)
+  "Return non-nil if KEYWORD is a done keyword where the heading at MARKER is.
+Each Org file can define its own."
+  (and keyword
+       (org-with-point-at marker (member keyword org-done-keywords))
+       t))
 
 (defun org-linear--op-signature (op)
   "Return a string that identifies the content of OP."
@@ -2194,7 +2212,8 @@ A field that cannot be sent is logged and left out."
          input)
     (dolist (field fields)
       (setq input (append input (org-linear--field-input (car field) (cdr field) team
-                                                         (plist-get op :label-ids)))))
+                                                         (plist-get op :label-ids)
+                                                         (plist-get op :done)))))
     (setq input (append input (org-linear--relation-input (plist-get op :relations))))
     (setq input (org-linear--with-start-label input (plist-get op :label-ids) start
                                               (and start-field t) team))
@@ -2217,12 +2236,14 @@ A field that cannot be sent is logged and left out."
                      input)))
      (t (funcall callback input)))))
 
-(defun org-linear--field-input (field value team &optional label-ids)
+(defun org-linear--field-input (field value team &optional label-ids done)
   "Return the IssueUpdateInput entries that set FIELD to VALUE in TEAM.
-LABEL-IDS are the issue's labels now, for the tags."
+LABEL-IDS are the issue's labels now, for the tags.  DONE non-nil means
+VALUE, a TODO keyword, is a done keyword in its heading's file; see
+`org-linear--keyword-state'."
   (pcase field
     (:title `((title . ,value)))
-    (:todo (if-let* ((state (org-linear--keyword-state value team)))
+    (:todo (if-let* ((state (org-linear--keyword-state value team done)))
                `((stateId . ,(alist-get 'id state)))
              (org-linear--log "Not sent: %s is no workflow state of the team" value)
              nil))
@@ -2653,13 +2674,17 @@ cookie would have it replaced by the listed one."
 (defun org-linear--remote-keyword (task base)
   "Return the keyword that stands for TASK's state.
 In the in-place layout several keywords can stand for one state, so the
-keyword of BASE is kept while it still maps to that state."
+keyword of BASE is kept while it still maps to that state.  The current
+buffer must be that of the issue's heading there, since its file says
+which keywords are done ones."
   (let ((keyword (org-linear--state-keyword (alist-get 'status task) (alist-get 'state_type task)))
         (old (plist-get base :todo)))
     (cond
      ((not (eq org-linear-layout 'in-place)) keyword)
      ((and old (not (equal old keyword))
-           (equal (alist-get 'name (org-linear--keyword-state old (alist-get 'team_id task)))
+           (equal (alist-get 'name (org-linear--keyword-state
+                                    old (alist-get 'team_id task)
+                                    (member old org-done-keywords)))
                   (alist-get 'status task)))
       old)
      (t (org-linear--org-keyword keyword (alist-get 'closed task))))))

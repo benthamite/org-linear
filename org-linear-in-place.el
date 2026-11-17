@@ -2299,7 +2299,8 @@ sent as a canceled workflow state, and `done' for any other done one."
   (cond
    ((not (member keyword org-done-keywords)) 'open)
    ((or (member (alist-get 'type (org-linear--keyword-state
-                                  keyword (alist-get 'id (car (plist-get org-linear--meta :teams)))))
+                                  keyword (alist-get 'id (car (plist-get org-linear--meta :teams)))
+                                  t))
                 '("canceled" "duplicate"))
         (equal keyword (cdr (assoc "canceled" org-linear-type-keywords))))
     'canceled)
