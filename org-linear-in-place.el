@@ -1461,40 +1461,51 @@ buffer your hooks never set up."
 (defun org-linear-in-place--insert-in-inbox (task converted comments)
   "Insert TASK, created in Linear, under the inbox heading; return edits to send.
 CONVERTED maps conversion keys to Org text; COMMENTS are its comments.
-The edits give the issue the inbox file's label."
+The edits give the issue the inbox file's label.  The inbox is edited
+widened, as a sync edit: when it is read only now, because it had
+unsaved edits as the sync began, the sync has not widened it as it does
+the buffers it read before applying, and a narrowed inbox would hide its
+own heading."
   (if-let* ((buffer (and org-linear-inbox-file
                          (org-linear-in-place--index-file
                           (expand-file-name org-linear-inbox-file) org-linear--scan))))
       (with-current-buffer buffer
-        (let* ((view (org-linear-in-place--without-file-tags
-                      (org-linear--remote-view task converted nil)))
-               (heading (org-linear-in-place--inbox-heading))
-               (level (1+ (org-with-point-at heading (org-outline-level))))
-               (pos (org-with-point-at heading
-                      (org-end-of-subtree t t)
-                      (unless (bolp) (insert "\n"))
-                      (point)))
-               (base (append (copy-sequence view)
-                             (list :desc-md (alist-get 'description task)
-                                   :edited (alist-get 'last_edited_time task)
-                                   :note-keys nil :comment-ids nil)))
-               marker)
-          (goto-char pos)
-          (insert (org-linear--heading-string view (alist-get 'closed_at task) level))
-          ;; Made once the heading is there: inserted text pushes such a
-          ;; marker, which would end up at whatever follows the heading.
-          (setq marker (org-linear--marker pos))
-          (org-linear--set-static-properties marker task)
-          (setq base (org-linear--insert-comments marker comments base))
-          (puthash (alist-get 'id task) base (org-linear--state-tasks))
-          (puthash (alist-get 'id task) marker (plist-get org-linear--scan :tasks))
-          (puthash (alist-get 'id task) (org-linear--buffer-file)
-                   (plist-get org-linear--scan :present))
-          (org-linear--count :pulled)
-          (org-linear--merge task converted nil nil nil marker base)))
+        (org-linear--with-sync-edits
+         (lambda () (org-linear-in-place--add-to-inbox task converted comments))))
     (org-linear--log "Not added: %s; set `org-linear-inbox-file', or save it"
                      (alist-get 'identifier task))
     nil))
+
+(defun org-linear-in-place--add-to-inbox (task converted comments)
+  "Insert TASK under the inbox heading of the current buffer, widened.
+Return the edits to send; CONVERTED and COMMENTS are as in
+`org-linear-in-place--insert-in-inbox'."
+  (let* ((view (org-linear-in-place--without-file-tags
+                (org-linear--remote-view task converted nil)))
+         (heading (org-linear-in-place--inbox-heading))
+         (level (1+ (org-with-point-at heading (org-outline-level))))
+         (pos (org-with-point-at heading
+                (org-end-of-subtree t t)
+                (unless (bolp) (insert "\n"))
+                (point)))
+         (base (append (copy-sequence view)
+                       (list :desc-md (alist-get 'description task)
+                             :edited (alist-get 'last_edited_time task)
+                             :note-keys nil :comment-ids nil)))
+         marker)
+    (goto-char pos)
+    (insert (org-linear--heading-string view (alist-get 'closed_at task) level))
+    ;; Made once the heading is there: inserted text pushes such a
+    ;; marker, which would end up at whatever follows the heading.
+    (setq marker (org-linear--marker pos))
+    (org-linear--set-static-properties marker task)
+    (setq base (org-linear--insert-comments marker comments base))
+    (puthash (alist-get 'id task) base (org-linear--state-tasks))
+    (puthash (alist-get 'id task) marker (plist-get org-linear--scan :tasks))
+    (puthash (alist-get 'id task) (org-linear--buffer-file)
+             (plist-get org-linear--scan :present))
+    (org-linear--count :pulled)
+    (org-linear--merge task converted nil nil nil marker base)))
 
 (defun org-linear-in-place--without-file-tags (view)
   "Return VIEW without the tags of file labels, which no heading shows."

@@ -4165,5 +4165,40 @@ one, and the next sync sent that heading to Linear as the issue
     (should-not (org-linear-test--writes))
     (should (equal (alist-get 'title (gethash "i6" org-linear-test--issues)) "Peter's task"))))
 
+(ert-deftest org-linear-test-in-place-narrowed-inbox-takes-issues-under-its-heading ()
+  "An inbox narrowed to a subtree takes new issues under its inbox heading.
+The inbox is read while the sync applies when it had unsaved edits as
+the sync began and was saved meanwhile.  It was then searched as
+narrowed: its heading was not found, and a second one was added at the
+end of the subtree (17 Nov 2026)."
+  (org-linear-test--with-notes
+      '(("inbox.org" . "#+TODO: TODO IMPORTANT WAITING | DONE CANCELLED\n* Other\nMine.\n* Linear\n"))
+    (let ((buffer (find-file-noselect org-linear-inbox-file)))
+      (with-current-buffer buffer
+        (goto-char (point-min))
+        (re-search-forward "^\\* Other")
+        (org-narrow-to-subtree)
+        (goto-char (point-max))
+        (insert "\nMore."))
+      (cl-letf (((symbol-function 'org-linear-in-place--ensure-labels)
+                 (let ((ensure (symbol-function 'org-linear-in-place--ensure-labels)))
+                   (lambda (callback)
+                     ;; Saved once the sync is past the files it reads
+                     ;; before it applies.
+                     (with-current-buffer buffer (save-buffer))
+                     (funcall ensure callback)))))
+        (org-linear-test--sync))
+      (let ((inbox (org-linear-test--note "inbox.org")))
+        (should (string-match-p
+                 "^\\* Other\nMine\\.\nMore\\.\n\\* Linear\n\\*\\* TODO \\[#B\\] Task one"
+                 inbox))
+        (should (= 1 (with-temp-buffer
+                       (insert inbox)
+                       (how-many "^\\* Linear$" (point-min) (point-max))))))
+      (with-current-buffer buffer
+        (should (buffer-narrowed-p))
+        (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                       "* Other\nMine.\nMore."))))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here
