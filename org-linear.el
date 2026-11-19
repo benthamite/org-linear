@@ -234,6 +234,14 @@ changes.  No sync starts while the file has unsaved edits."
   :type 'integer
   :group 'org-linear)
 
+(defcustom org-linear-stall-minutes 15
+  "Minutes without progress after which a running sync counts as stalled.
+A stalled sync stays marked as running, so no later sync starts until
+`org-linear-end-stalled-sync' ends it.  The next sync requested after it
+stalls reports it in the echo area and the sync log."
+  :type 'integer
+  :group 'org-linear)
+
 (defconst org-linear-api-url "https://api.linear.app/graphql"
   "Linear's GraphQL endpoint.")
 
@@ -280,6 +288,12 @@ agenda.")
 
 (defvar org-linear--busy nil
   "Non-nil while a sync runs.")
+
+(defvar org-linear--progress nil
+  "How far the sync in progress has got, a plist.
+:started is when it started and :at when it last made progress, both as
+from `float-time'; :step says what it did then; :reported is non-nil
+once its stall has been reported.")
 
 (defvar org-linear--pending nil
   "Non-nil when a sync was requested while another one ran.")
@@ -474,7 +488,7 @@ so that a profile entered again inside another one sees its live state.")
 
 (defconst org-linear--profile-state-variables
   '(org-linear--state org-linear--meta org-linear--api-key-cache org-linear--busy
-    org-linear--pending org-linear--saving org-linear--archive org-linear--stats
+    org-linear--progress org-linear--pending org-linear--saving org-linear--archive org-linear--stats
     org-linear--rerun org-linear--reruns org-linear--announce org-linear--refresh-list
     org-linear--list-buffer org-linear--agenda-project-width org-linear--scan
     org-linear--body-overrides)
@@ -641,7 +655,9 @@ the sync too, and then continues."
                  "Linear sync: one is running; another will follow"
                "Linear sync: started")))
   (if org-linear--busy
-      (setq org-linear--pending t)
+      (progn (org-linear--report-stall)
+             (setq org-linear--pending t))
+    (org-linear--start-progress)
     (setq org-linear--busy t
           org-linear--pending nil
           org-linear--rerun nil
@@ -649,6 +665,62 @@ the sync too, and then continues."
                                   :conflicts 0 :errors 0))
     (org-linear--ending-sync-on-failure
       (org-linear--start))))
+
+(defun org-linear--start-progress ()
+  "Record that a sync starts now."
+  (let ((now (float-time)))
+    (setq org-linear--progress (list :started now :at now :step "started"))))
+
+(defun org-linear--note-progress (step)
+  "Record that the sync in progress has just reached STEP, a string."
+  (when org-linear--busy
+    (setq org-linear--progress
+          (list :started (plist-get org-linear--progress :started)
+                :at (float-time) :step step))))
+
+(defun org-linear--report-stall ()
+  "Report the running sync as stalled, once, if it is.
+The report goes to the echo area and the sync log, since a stalled sync
+stops every later one until `org-linear-end-stalled-sync' ends it."
+  (when (and (org-linear--stalled-p)
+             (not (plist-get org-linear--progress :reported)))
+    (setq org-linear--progress (plist-put (copy-sequence org-linear--progress) :reported t))
+    (let ((text (format "the sync started at %s has made no progress since %s, after: %s; no sync runs until M-x org-linear-end-stalled-sync ends it"
+                        (format-time-string "%F %T" (plist-get org-linear--progress :started))
+                        (format-time-string "%T" (plist-get org-linear--progress :at))
+                        (plist-get org-linear--progress :step))))
+      (org-linear--log "Stalled: %s" text)
+      (message "Linear sync stalled: %s" text))))
+
+(defun org-linear--stalled-p ()
+  "Return non-nil if the running sync has made no progress for too long.
+Too long is `org-linear-stall-minutes'."
+  (let ((at (plist-get org-linear--progress :at)))
+    (and org-linear--busy at
+         (> (- (float-time) at) (* 60 org-linear-stall-minutes)))))
+
+;;;###autoload
+(defun org-linear-end-stalled-sync (&optional profile)
+  "End the running sync of PROFILE as failed, so that later syncs can run.
+Use it when a sync has stalled (see `org-linear-stall-minutes').  It
+asks first if the sync is still making progress.  PROFILE is as in
+`org-linear-sync'."
+  (interactive (list (if current-prefix-arg
+                         (org-linear--read-profile)
+                       (or org-linear--buffer-profile 'default))))
+  (if (and profile (not (eq profile org-linear--profile)))
+      (org-linear--with-profile (unless (eq profile 'default) profile)
+        (org-linear--end-stalled-sync))
+    (org-linear--end-stalled-sync)))
+
+(defun org-linear--end-stalled-sync ()
+  "End the running sync of the profile in effect, if confirmed."
+  (cond
+   ((not org-linear--busy) (message "No Linear sync is running"))
+   ((or (org-linear--stalled-p)
+        (y-or-n-p "The Linear sync is still making progress; end it anyway? "))
+    (org-linear--fail "ended by hand after %s"
+                      (or (plist-get org-linear--progress :step) "an unknown step")))))
 
 (autoload 'org-linear-preview "org-linear-in-place"
   "Show what the next in-place sync would create and skip." t)
@@ -1118,7 +1190,8 @@ The file is saved only if it had no unsaved edits before."
     ("a" org-linear-auto-sync-mode
      :description org-linear--auto-sync-description
      :transient t)
-    ("l" "Show log" org-linear-show-log)]])
+    ("l" "Show log" org-linear-show-log)
+    ("e" "End stalled sync" org-linear-end-stalled-sync)]])
 
 (defun org-linear--auto-sync-description ()
   "Return the menu's label for `org-linear-auto-sync-mode', with its state."
@@ -2564,6 +2637,7 @@ not sent again while later edits still go through."
   "End the sync, report it, and start any sync requested meanwhile."
   (org-linear--flush-in-place)
   (setq org-linear--busy nil
+        org-linear--progress nil
         org-linear--api-key-cache nil)
   (org-linear--report)
   (org-linear--refresh-list-after-sync)
@@ -2598,7 +2672,8 @@ files in."
           org-linear--announce nil
           org-linear--refresh-list nil)
     (when org-linear--busy
-      (setq org-linear--busy nil)
+      (setq org-linear--busy nil
+            org-linear--progress nil)
       (message "Linear sync failed: %s (M-x org-linear-show-log)" text)
       (when org-linear--pending
         (run-with-timer 5 nil (org-linear--bound #'org-linear-sync))))))
@@ -4014,6 +4089,7 @@ When Linear rejects the key and RETRIED is nil, drop the cached key with
 `org-linear-api-key-forget-command' and try once more."
   (org-linear--with-api-key
    (lambda (key)
+     (org-linear--note-progress (format "asked Linear: %s" (org-linear--operation-name query)))
      (let ((body (let ((inhibit-message t)
                        (message-log-max nil))
                    (make-temp-file "org-linear" nil ".json"
@@ -4029,6 +4105,12 @@ When Linear rejects the key and RETRIED is nil, drop the cached key with
         (lambda (code out err)
           (delete-file body)
           (org-linear--handle-response query variables callback errback retried code out err)))))))
+
+(defun org-linear--operation-name (query)
+  "Return the name of the GraphQL operation QUERY, or its first line."
+  (if (string-match "\\`\\s-*\\(?:query\\|mutation\\)\\s-+\\([A-Za-z0-9_]+\\)" query)
+      (match-string 1 query)
+    (car (split-string (string-trim query) "\n"))))
 
 (defun org-linear--handle-response (query variables callback errback retried code out err)
   "Handle Linear's answer to QUERY with VARIABLES.
@@ -4094,6 +4176,7 @@ remembered as refused."
   (cond
    (org-linear--api-key-cache (funcall callback org-linear--api-key-cache))
    (org-linear-api-key-command
+    (org-linear--note-progress "asked for the API key")
     (org-linear--run-process
      org-linear-api-key-command nil
      (lambda (code out err)
@@ -4130,6 +4213,8 @@ process starts in a missing one."
          (callback (org-linear--bound
                     (lambda (&rest args)
                       (org-linear--ending-sync-on-failure
+                        (org-linear--note-progress
+                         (format "%s answered" (file-name-nondirectory (car command))))
                         (apply callback args)))))
          (out (generate-new-buffer " *org-linear-out*"))
          (err (generate-new-buffer " *org-linear-err*"))

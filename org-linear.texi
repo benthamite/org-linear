@@ -300,6 +300,10 @@ A sync never changes the file while it has unsaved edits@comma{} and never appli
 @findex org-linear-show-log
 @samp{M-x org-linear-show-log} shows the sync log: conflicts@comma{} refused and rejected writes@comma{} issues not created@comma{} and errors. When a sync fails@comma{} its message points there.
 
+@findex org-linear-end-stalled-sync
+@vindex org-linear-stall-minutes
+Only one sync of a profile runs at a time; one requested meanwhile waits for it. A sync records each step it reaches: a request sent and its answer@comma{} a slice of reading or applying. When it has reached none for @code{org-linear-stall-minutes}@comma{} 15 by default@comma{} it has stalled@comma{} and since it still counts as running@comma{} no later sync starts. The next sync requested then reports the stall@comma{} once@comma{} in the echo area and the sync log@comma{} with when the sync started@comma{} when it last made progress and its last step. @samp{M-x org-linear-end-stalled-sync} ends it as failed@comma{} which logs that step and starts the waiting sync; for a sync that is still making progress it asks first.
+
 @node The agenda
 @chapter The agenda
 
@@ -327,7 +331,7 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @findex org-linear-menu
 @samp{M-x org-linear-menu} gathers the package's commands in a transient menu. In the list of your issues@comma{} @samp{.} opens it; elsewhere the package binds it to no key@comma{} so bind it yourself if you use it often.
 
-@multitable {aaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@multitable {aaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Key
 @tab Command
 @tab What it does
@@ -364,6 +368,9 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @item @samp{l}
 @tab @code{org-linear-show-log}
 @tab Show the sync log
+@item @samp{e}
+@tab @code{org-linear-end-stalled-sync}
+@tab End a sync that has stalled
 @end multitable
 
 Every key is always shown; @samp{b}@comma{} @samp{t}@comma{} @samp{c} and @samp{p} act on the issue at point@comma{} in the file or in the list of your issues. The @samp{a} key shows whether the mode is on@comma{} and the menu stays open after you press it.

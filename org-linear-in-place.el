@@ -174,6 +174,7 @@ error or a quit in a slice ends the sync."
           (org-linear--bound
            (lambda ()
              (org-linear--ending-sync-on-failure
+               (org-linear--note-progress "read in slices")
                (let ((deadline (+ (float-time) org-linear-in-place--slice))
                      more)
                  (while (and (setq more (funcall step)) (< (float-time) deadline)))
@@ -930,6 +931,7 @@ visiting buffer; see `org-linear-in-place--visit-edited'."
           (org-linear--bound
            (lambda ()
              (org-linear--ending-sync-on-failure
+               (org-linear--note-progress "applied changes in slices")
                (org-linear-in-place--drop-changed-buffers)
                (let ((deadline (+ (float-time) org-linear-in-place--slice)))
                  (org-linear-in-place--with-edits

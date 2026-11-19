@@ -1118,7 +1118,8 @@ Each mirrors it into its own file, and the default profile has no teams."
                    ("v" . org-linear-visit) ("b" . org-linear-browse)
                    ("s" . org-linear-sync) ("a" . org-linear-auto-sync-mode)
                    ("l" . org-linear-show-log) ("t" . org-linear-my-issues-todo)
-                   ("c" . org-linear-comment) ("p" . org-linear-set-project)))
+                   ("c" . org-linear-comment) ("p" . org-linear-set-project)
+                   ("e" . org-linear-end-stalled-sync)))
     (let ((suffix (transient-get-suffix 'org-linear-menu (car entry))))
       (should (memq (cdr entry) (flatten-tree suffix)))
       (should (commandp (cdr entry))))))
@@ -1135,7 +1136,7 @@ Each mirrors it into its own file, and the default profile has no teams."
                                   (symbol-file 'org-linear-sync 'defun))
                            (not (ignore-errors
                                   (catch 'found
-                                    (dolist (key '("m" "v" "b" "t" "c" "p" "x" "X" "s" "a" "l"))
+                                    (dolist (key '("m" "v" "b" "t" "c" "p" "x" "X" "s" "a" "l" "e"))
                                       (when (memq sym (flatten-tree
                                                        (transient-get-suffix 'org-linear-menu key)))
                                         (throw 'found t)))))))
@@ -1186,7 +1187,7 @@ Each mirrors it into its own file, and the default profile has no teams."
 
 (ert-deftest org-linear-test-menu-shows-every-key ()
   "No menu key is hidden, so every command is offered wherever the menu opens."
-  (dolist (key '("m" "v" "b" "t" "c" "p" "x" "X" "s" "a" "l"))
+  (dolist (key '("m" "v" "b" "t" "c" "p" "x" "X" "s" "a" "l" "e"))
     (should-not (plist-get (cdr (transient-get-suffix 'org-linear-menu key)) :if))))
 
 (ert-deftest org-linear-test-menu-auto-sync-label ()
@@ -1794,6 +1795,67 @@ Removing it ends the snooze."
                    (when fmt (push (apply #'format fmt args) ,var))
                    (apply orig fmt args))))
        ,@body)))
+
+;;;; Stalled syncs
+
+(defun org-linear-test--stall (minutes)
+  "Mark a sync as running with no progress for MINUTES minutes."
+  (let ((then (- (float-time) (* 60 minutes))))
+    (setq org-linear--busy t
+          org-linear--progress (list :started then :at then :step "asked Linear: OrgLinearIssues"))))
+
+(ert-deftest org-linear-test-sync-records-progress ()
+  "A sync records its steps while it runs and clears them when it ends."
+  (org-linear-test--with-board
+    (let (steps)
+      (advice-add 'org-linear--note-progress :after
+                  (lambda (step) (push step steps)) '((name . org-linear-test-steps)))
+      (unwind-protect
+          (org-linear-test--sync)
+        (advice-remove 'org-linear--note-progress 'org-linear-test-steps))
+      (should (member "read in slices" steps)))
+    (should-not org-linear--busy)
+    (should-not org-linear--progress)))
+
+(ert-deftest org-linear-test-stalled-sync-is-reported-once ()
+  "A sync requested behind a stalled one reports the stall, once."
+  (org-linear-test--with-board
+    (org-linear-test--stall 20)
+    (org-linear-test--with-messages shown
+      (org-linear--sync nil)
+      (org-linear--sync nil)
+      (should (= 1 (cl-count-if (lambda (m) (string-match-p "Linear sync stalled" m)) shown))))
+    (should (string-match-p "Stalled: .*OrgLinearIssues" (org-linear-test--log)))
+    (should org-linear--pending)
+    (setq org-linear--busy nil org-linear--progress nil org-linear--pending nil)))
+
+(ert-deftest org-linear-test-slow-sync-is-not-stalled ()
+  "A sync that made progress recently is not reported as stalled."
+  (org-linear-test--with-board
+    (org-linear-test--stall 1)
+    (org-linear--sync nil)
+    (should-not (string-match-p "Stalled" (org-linear-test--log)))
+    (setq org-linear--busy nil org-linear--progress nil org-linear--pending nil)))
+
+(ert-deftest org-linear-test-end-stalled-sync ()
+  "Ending a stalled sync frees the way for the next one and logs it."
+  (org-linear-test--with-board
+    (org-linear-test--stall 20)
+    (cl-letf (((symbol-function 'run-with-timer) #'ignore))
+      (org-linear-end-stalled-sync))
+    (should-not org-linear--busy)
+    (should-not org-linear--progress)
+    (should (string-match-p "Error: ended by hand after asked Linear: OrgLinearIssues"
+                            (org-linear-test--log)))))
+
+(ert-deftest org-linear-test-end-running-sync-asks ()
+  "Ending a sync that is still making progress needs confirmation."
+  (org-linear-test--with-board
+    (org-linear-test--stall 1)
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
+      (org-linear-end-stalled-sync))
+    (should org-linear--busy)
+    (setq org-linear--busy nil org-linear--progress nil)))
 
 (defun org-linear-test--list-text ()
   "Return the text of the list."
