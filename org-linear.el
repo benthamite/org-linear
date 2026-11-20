@@ -50,6 +50,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'transient)
+(require 'url-util)
 
 (declare-function auth-source-search "auth-source")
 
@@ -217,6 +218,22 @@ A section whose keyword the file does not define is left out."
 The list appears at once from the file and is rebuilt if the sync brings
 changes.  No sync starts while the file has unsaved edits."
   :type 'boolean
+  :group 'org-linear)
+
+(defcustom org-linear-emacs-link-types '("id")
+  "Org link types that open in Emacs when clicked in Linear.
+A link of one of these types, such as [[id:...][a heading]], means
+nothing to a browser.  In a description sent to Linear it becomes an
+org-protocol link, org-protocol://org-linear-open?link=..., which opens
+the Org link in Emacs (`org-linear-protocol-open'); a description read
+from Linear has it turned back into the Org link.  Opening one needs
+`org-protocol' loaded and the operating system to hand org-protocol://
+links to emacsclient.
+
+Only these types are opened that way, because any web page can send
+Emacs an org-protocol link: name only types whose links just show
+something.  Links of other types are sent as they are."
+  :type '(repeat string)
   :group 'org-linear)
 
 (defcustom org-linear-pandoc-program "pandoc"
@@ -1695,7 +1712,8 @@ table from KEY to the Org text."
                (cl-incf running)
                (org-linear--run-process
                 (list org-linear-pandoc-program "-f" "gfm" "-t" "org" "--wrap=none")
-                (org-linear--flatten-md-headings (cdr item))
+                (org-linear--flatten-md-headings
+                 (org-linear--protocol-to-emacs-links (cdr item)))
                 (lambda (code out err)
                   (cl-decf running)
                   (cond
@@ -1731,7 +1749,55 @@ An Org heading inside an issue's body would split the issue."
      (lambda (code out err)
        (if (/= code 0)
            (org-linear--fail "pandoc failed: %s" err)
-         (funcall callback (org-linear--label-bare-links (string-trim out))))))))
+         (funcall callback (org-linear--emacs-links-to-protocol
+                            (org-linear--label-bare-links (string-trim out)))))))))
+
+;;;; Emacs links in Linear
+
+(defconst org-linear--protocol-prefix "org-protocol://org-linear-open?link="
+  "What a link that opens an Org link in Emacs starts with, before that link.")
+
+(defun org-linear--emacs-links-to-protocol (markdown)
+  "Turn MARKDOWN's links of `org-linear-emacs-link-types' into org-protocol links.
+A link is [TEXT](TYPE:PATH), as pandoc writes an Org link."
+  (if (null org-linear-emacs-link-types)
+      markdown
+    (replace-regexp-in-string
+     (concat "](<?\\(\\(?:" (regexp-opt org-linear-emacs-link-types) "\\):[^)> \t\n]+\\)>?)")
+     (lambda (match)
+       (let ((link (match-string 1 match)))
+         (concat "](" org-linear--protocol-prefix
+                 (save-match-data (url-hexify-string link)) ")")))
+     markdown t t)))
+
+(defun org-linear--protocol-to-emacs-links (markdown)
+  "Turn MARKDOWN's org-protocol links back into the Org links they open.
+The inverse of `org-linear--emacs-links-to-protocol', for a description
+read from Linear, which may have put the target in angle brackets."
+  (replace-regexp-in-string
+   (concat "](<?" (regexp-quote org-linear--protocol-prefix) "\\([^)> \t\n]+\\)>?)")
+   (lambda (match)
+     (let ((link (match-string 1 match)))
+       (concat "](" (save-match-data (url-unhex-string link)) ")")))
+   markdown t t))
+
+;;;###autoload
+(defun org-linear-protocol-open (data)
+  "Open the Org link DATA names, for an org-protocol link clicked in Linear.
+DATA is a plist whose :link is the link, such as \"id:ABC\".  Only a
+link of `org-linear-emacs-link-types' is opened."
+  (let* ((link (or (plist-get data :link) ""))
+         (type (and (string-match "\\`\\([^:]+\\):" link) (match-string 1 link))))
+    (unless (member type org-linear-emacs-link-types)
+      (user-error "org-linear opens no %s link from outside Emacs" (or type "such")))
+    (org-link-open-from-string (format "[[%s]]" link))
+    nil))
+
+(with-eval-after-load 'org-protocol
+  (defvar org-protocol-protocol-alist)
+  (add-to-list 'org-protocol-protocol-alist
+               '("org-linear-open" :protocol "org-linear-open"
+                 :function org-linear-protocol-open)))
 
 (defun org-linear--label-bare-links (markdown)
   "Turn MARKDOWN's autolinks, <URL>, into [URL](URL)."

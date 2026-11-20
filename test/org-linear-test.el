@@ -4319,5 +4319,57 @@ long as their files did not change (17 Nov 2026)."
       (should-not (org-linear-test--calls "OrgLinearArchive"))
       (should-not (alist-get 'archived (gethash id org-linear-test--issues))))))
 
+;;;; Emacs links in Linear
+
+(defun org-linear-test--until (predicate)
+  "Wait up to 10 seconds for PREDICATE to return non-nil."
+  (let ((deadline (+ (float-time) 10)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))))
+
+(ert-deftest org-linear-test-emacs-links-become-protocol-links-and-back ()
+  "A link of an Emacs link type goes to Linear as an org-protocol link.
+Read back, with or without angle brackets, it is the Org link again;
+web links and other types are left alone."
+  (let ((org-linear-emacs-link-types '("id" "protean")))
+    (let ((md (org-linear--emacs-links-to-protocol
+               "[conversation](protean:153) and [h](id:AB-1) [w](https://a.b/c) [f](file:x.org)")))
+      (should (equal md (concat "[conversation](org-protocol://org-linear-open?link=protean%3A153)"
+                                " and [h](org-protocol://org-linear-open?link=id%3AAB-1)"
+                                " [w](https://a.b/c) [f](file:x.org)")))
+      (should (equal (org-linear--protocol-to-emacs-links md)
+                     "[conversation](protean:153) and [h](id:AB-1) [w](https://a.b/c) [f](file:x.org)")))
+    (should (equal (org-linear--protocol-to-emacs-links
+                    "[c](<org-protocol://org-linear-open?link=protean%3A153>)")
+                   "[c](protean:153)")))
+  (let ((org-linear-emacs-link-types nil))
+    (should (equal (org-linear--emacs-links-to-protocol "[c](protean:153)") "[c](protean:153)"))))
+
+(ert-deftest org-linear-test-emacs-links-survive-pandoc-both-ways ()
+  "An Org body with an Emacs link converts to Markdown and back unchanged."
+  (skip-unless (executable-find org-linear-pandoc-program))
+  (let ((org-linear-emacs-link-types '("protean"))
+        (body "See the [[protean:153][conversation]].")
+        md org)
+    (org-linear--org-to-md body (lambda (result) (setq md result)))
+    (org-linear-test--until (lambda () md))
+    (should (string-search "(org-protocol://org-linear-open?link=protean%3A153)" md))
+    (org-linear--md-to-org (list (cons 'k md)) (lambda (result) (setq org (gethash 'k result))))
+    (org-linear-test--until (lambda () org))
+    (should (equal org body))))
+
+(ert-deftest org-linear-test-protocol-opens-only-its-link-types ()
+  "The org-protocol handler opens a link of an Emacs link type, and no other."
+  (let ((org-linear-emacs-link-types '("protean"))
+        (opened nil))
+    (cl-letf (((symbol-function 'org-link-open-from-string)
+               (lambda (link &rest _) (setq opened link))))
+      (org-linear-protocol-open '(:link "protean:153"))
+      (should (equal opened "[[protean:153]]"))
+      (setq opened nil)
+      (should-error (org-linear-protocol-open '(:link "shell:rm -rf x")) :type 'user-error)
+      (should-error (org-linear-protocol-open '(:link "nothing")) :type 'user-error)
+      (should-not opened))))
+
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

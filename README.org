@@ -407,6 +407,10 @@ Linear rewrites the Markdown it is sent in its own style (bare links become =[UR
 
 A description edited in Linear replaces the heading's body when Linear's stored text of the old description converts back to exactly that body, so that the conversion loses nothing. Otherwise, because of markup Markdown cannot hold, such as a source block's header arguments, ~org-linear-merge-body-function~ merges the two: it gets the Org body, the Markdown of the last sync, Linear's new Markdown and a callback, and calls the callback with the merged Org body, or =nil=. The result is used only if it says what Linear's text says, compared as Org. Otherwise, or when the option is =nil=, the body stays and the log says why; that Linear text is not merged again, but a later edit on either side is. A model makes a good merge function.
 
+#+vindex: org-linear-emacs-link-types
+#+findex: org-linear-protocol-open
+A link that only Emacs understands, such as =[[id:...][a heading]]=, means nothing to a browser. For the link types in ~org-linear-emacs-link-types~ (=id= by default), the description sent to Linear holds an org-protocol link instead, =org-protocol://org-linear-open?link=...=: clicked in Linear, it opens the Org link in Emacs (~org-linear-protocol-open~). A description read from Linear has those links turned back into the Org links, so an edit made in Linear keeps them. Clicking one needs ~org-protocol~ loaded and the system set to hand =org-protocol://= links to =emacsclient=. Because any web page can send Emacs such a link, the handler opens only links of those types: list only types whose links merely show something. Links of other types, such as =file:=, are sent as they are and do not open from Linear. A description already in Linear changes only when its heading's body does.
+
 #+findex: org-linear-preview
 =M-x org-linear-preview= lists, per file, the headings the next sync would create, and the files it would skip, without sending or writing anything, and without visiting a file. Run it before the first sync.
 
