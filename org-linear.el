@@ -480,6 +480,21 @@ longer overview.  See `org-linear-project-create'."
   :type 'string
   :group 'org-linear)
 
+(defcustom org-linear-project-file nil
+  "File in which `org-linear-project-create' puts a project with no parent.
+A project with a parent goes under the parent's heading.  Nil means the
+file of the current buffer, if it is an Org file."
+  :type '(choice (const :tag "The current file" nil) file)
+  :group 'org-linear)
+
+(defcustom org-linear-project-directory-property nil
+  "Property of a project heading that names the project's directory, or nil.
+With it set, `org-linear-project-create' asks for a directory and refuses
+one that another project heading already names.  Nil means projects name
+no directory."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'org-linear)
+
 ;;;; Profiles
 
 (defcustom org-linear-profiles nil
@@ -1216,7 +1231,11 @@ The file is saved only if it had no unsaved edits before."
      :description org-linear--auto-sync-description
      :transient t)
     ("l" "Show log" org-linear-show-log)
-    ("e" "End stalled sync" org-linear-end-stalled-sync)]])
+    ("e" "End stalled sync" org-linear-end-stalled-sync)]
+   ["Projects"
+    ("n" "New project" org-linear-project-create)
+    ("r" "Roadmap" org-linear-roadmap)
+    ("w" "Where it fits" org-linear-project-context)]])
 
 (defun org-linear--auto-sync-description ()
   "Return the menu's label for `org-linear-auto-sync-mode', with its state."

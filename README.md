@@ -8,6 +8,7 @@
 - **Edit with Org.** Change a keyword to move an issue along, set a deadline, add a note with `C-c C-z` to comment, refile to move it to another project, or add a heading to create an issue.
 - **Safe merging.** The sync remembers each issue as it was at the last sync and merges three-way, field by field. A change made in Linear meanwhile is never overwritten; when both sides changed the same field, Linear wins and your version is kept in a log.
 - **In the background.** It syncs on save, on visit and every few minutes. All network work runs in subprocesses, so Emacs never waits on Linear.
+- **Projects and milestones.** In the in-place layout, project and milestone headings sync as Linear projects, initiatives and milestones, with each project's outcome as its summary. A command creates a project, a roadmap shows each project's milestones with their dates, progress and warnings, and another command shows which milestone and project a task serves.
 - **In your agenda.** Your issues' deadlines appear with the rest of your tasks, with issues assigned to others hidden if you like.
 
 It is for people who live in Emacs and Org but whose team tracks work in Linear.

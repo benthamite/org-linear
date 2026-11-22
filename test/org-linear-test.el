@@ -10,6 +10,7 @@
 (require 'cl-lib)
 (require 'org-linear)
 (require 'org-linear-in-place)
+(require 'org-linear-project)
 
 ;;;; The fake Linear
 
@@ -4401,6 +4402,200 @@ web links and other types are left alone."
       (should-error (org-linear-protocol-open '(:link "shell:rm -rf x")) :type 'user-error)
       (should-error (org-linear-protocol-open '(:link "nothing")) :type 'user-error)
       (should-not opened))))
+
+;;;; Project commands
+
+(defconst org-linear-project-test--plan
+  "* PROJECT Big
+:PROPERTIES:
+:OUTCOME: Everything ships
+:END:
+** PROJECT Site
+DEADLINE: <2099-12-01 Tue>
+*** MILESTONE Launch
+DEADLINE: <2099-12-24 Thu>
+**** TODO Write copy
+***** DONE Draft headline
+**** DONE Pick fonts
+*** MILESTONE Old
+DEADLINE: <2000-01-01 Sat>
+**** TODO Late task
+*** MILESTONE Empty
+*** TODO Site task
+* Notes
+** PROJECT Garden
+*** TODO Water
+* DONE Finished
+:PROPERTIES:
+:LINEAR_PROJECT: p-done
+:END:
+"
+  "Notes with projects, milestones and tasks at several depths.")
+
+(defmacro org-linear-project-test--with-plan (&rest body)
+  "Run BODY over notes holding `org-linear-project-test--plan' as plan.org.
+The notes are synced once, so the scan cache knows the file."
+  (declare (indent 0))
+  `(org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-project-test--plan))
+     (let ((org-linear-project-file nil)
+           (org-linear-project-directory-property nil))
+       (org-linear-test--sync-until-quiet)
+       ,@body)))
+
+(defun org-linear-project-test--answers (answers)
+  "Return a function that answers each prompt from ANSWERS.
+ANSWERS is an alist from a regexp matching a prompt to the answer."
+  (lambda (prompt &rest _)
+    (or (cdr (seq-find (lambda (pair) (string-match-p (car pair) prompt)) answers))
+        (error "Unexpected prompt %s" prompt))))
+
+(defmacro org-linear-project-test--answering (answers &rest body)
+  "Run BODY with the minibuffer prompts answered from ANSWERS."
+  (declare (indent 1))
+  `(let ((answer (org-linear-project-test--answers ,answers)))
+     (cl-letf (((symbol-function 'read-string) answer)
+               ((symbol-function 'completing-read) answer)
+               ((symbol-function 'read-directory-name) answer)
+               ((symbol-function 'y-or-n-p) answer))
+       ,@body)))
+
+(defun org-linear-project-test--node (nodes path)
+  "Return the project or milestone among NODES whose path is PATH."
+  (seq-find (lambda (node) (equal (org-linear-project--path node) path))
+            (append (org-linear-project--flatten nodes 'project)
+                    (org-linear-project--flatten nodes 'milestone))))
+
+(ert-deftest org-linear-project-test-forest ()
+  "Projects, milestones and tasks nest as the headings do, through plain ones."
+  (org-linear-project-test--with-plan
+    (let* ((nodes (org-linear-project--forest))
+           (big (org-linear-project-test--node nodes "Big"))
+           (launch (org-linear-project-test--node nodes "Big / Site / Launch")))
+      (should (equal (mapcar (lambda (node) (plist-get node :title)) nodes)
+                     '("Big" "Garden" "Finished")))
+      (should (equal (plist-get big :outcome) "Everything ships"))
+      (should (plist-get (org-linear-project-test--node nodes "Finished") :done))
+      (should (equal (plist-get launch :deadline) "2099-12-24"))
+      (should (equal (mapcar (lambda (task) (plist-get task :title))
+                             (org-linear-project--tasks launch))
+                     '("Write copy" "Draft headline" "Pick fonts")))
+      (should (= (length (org-linear-project--tasks big)) 5)))))
+
+(ert-deftest org-linear-project-test-create-under-parent ()
+  "A new subproject goes last under its parent, and the sync creates it."
+  (org-linear-project-test--with-plan
+    (org-linear-project-test--answering
+        '(("Project name" . "Shop")
+          ("Outcome" . "People buy online")
+          ("Parent project" . "Big / Site")
+          ("Target date" . "2099-11-15"))
+      (org-linear-project-create))
+    (let ((text (org-linear-test--note "plan.org")))
+      (should (string-match-p
+               "\\*\\*\\* TODO Site task\n\\(?::.*\n\\)*\\*\\*\\* PROJECT Shop\nDEADLINE: <2099-11-15 [A-Z][a-z]+>\n:PROPERTIES:\n:OUTCOME: +People buy online\n:END:\n\\* Notes"
+               text)))
+    (org-linear-test--sync-until-quiet)
+    (let ((shop (org-linear-test--named org-linear-test--projects "Shop")))
+      (should shop)
+      (should (equal (alist-get 'description shop) "People buy online"))
+      (should (equal (alist-get 'targetDate shop) "2099-11-15")))))
+
+(ert-deftest org-linear-project-test-create-top-level ()
+  "A project with no parent goes at the end of `org-linear-project-file'."
+  (org-linear-project-test--with-plan
+    (let ((org-linear-project-file (expand-file-name "projects.org" org-linear-test--notes)))
+      (org-linear-test--write-note "projects.org" "#+title: Projects\n")
+      (org-linear-project-test--answering
+          '(("Project name" . "Solo") ("Outcome" . "") ("Parent project" . "(none)")
+            ("Target date" . ""))
+        (org-linear-project-create))
+      (should (equal (org-linear-test--note "projects.org")
+                     "#+title: Projects\n* PROJECT Solo\n")))))
+
+(ert-deftest org-linear-project-test-create-refuses-file-out-of-scope ()
+  "A project is not put in a file the profile does not sync."
+  (org-linear-project-test--with-plan
+    (let ((org-linear-project-file (expand-file-name "excluded.org" org-linear-test--notes)))
+      (org-linear-test--write-note "excluded.org" "")
+      (org-linear-project-test--answering
+          '(("Project name" . "Solo") ("Outcome" . "") ("Parent project" . "(none)")
+            ("Target date" . ""))
+        (should-error (org-linear-project-create) :type 'user-error))
+      (should (equal (org-linear-test--note "excluded.org") "")))))
+
+(ert-deftest org-linear-project-test-create-directory ()
+  "A directory is recorded, and one another project names is refused."
+  (org-linear-project-test--with-plan
+    (let ((org-linear-project-directory-property "PROJECT_DIR")
+          (dir (file-name-as-directory (expand-file-name "repo" org-linear-test--dir))))
+      (make-directory dir t)
+      (org-linear-project-test--answering
+          `(("Project name" . "Repo") ("Outcome" . "") ("Parent project" . "Big")
+            ("Target date" . "") ("directory of its own" . t) ("Directory" . ,dir))
+        (org-linear-project-create)
+        (should (equal (org-linear-test--property-of "plan.org" "Repo" "PROJECT_DIR")
+                       (abbreviate-file-name (directory-file-name dir))))
+        (should-error (org-linear-project-create) :type 'user-error)))))
+
+(ert-deftest org-linear-project-test-context ()
+  "From a task, the chain runs from its milestone up to the top project."
+  (org-linear-project-test--with-plan
+    (let (offered)
+      (with-current-buffer (find-file-noselect (expand-file-name "plan.org" org-linear-test--notes))
+        (goto-char (point-min))
+        (re-search-forward "Draft headline")
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt choices &rest _)
+                     (setq offered (mapcar #'car choices))
+                     (nth 1 offered))))
+          (org-linear-project-context))
+        (should (equal offered '("Milestone: Launch (due 2099-12-24)"
+                                 "Project: Site (due 2099-12-01)"
+                                 "Project: Big — Everything ships")))
+        (should (looking-at-p "\\*\\* PROJECT Site"))))))
+
+(ert-deftest org-linear-project-test-context-outside-projects ()
+  "A heading in no project has no context."
+  (org-linear-project-test--with-plan
+    (with-current-buffer (find-file-noselect (expand-file-name "plan.org" org-linear-test--notes))
+      (goto-char (point-min))
+      (re-search-forward "^\\* Notes")
+      (should-error (org-linear-project-context) :type 'user-error))))
+
+(ert-deftest org-linear-project-test-roadmap ()
+  "The roadmap shows dates, progress and warnings, and visits headings."
+  (org-linear-project-test--with-plan
+    (org-linear-project-test--answering '(("Roadmap of" . "Big"))
+      (org-linear-roadmap))
+    (with-current-buffer "*org-linear roadmap*"
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p "■ Big .*  2/5 " text))
+        (should (string-match-p "Outcome: Everything ships" text))
+        (should (string-match-p "◆ Launch .*2099-12-24 .* 2/3 .*due after its project" text))
+        (should (string-match-p "◆ Old .*2000-01-01 .*overdue" text))
+        (should (string-match-p "◆ Empty .*no date.*no open tasks" text))
+        (should (string-match-p "1 open task in no milestone" text))
+        (should-not (string-match-p "Garden" text))
+        ;; Milestones come by date, before the project's own tasks.
+        (should (< (string-search "Old" text) (string-search "Launch" text)
+                   (string-search "Empty" text)))
+        (org-linear-roadmap-toggle-tasks)
+        (should (string-match-p "- Site task" (buffer-string)))
+        (goto-char (point-min))
+        (re-search-forward "Launch")
+        (org-linear-roadmap-visit)
+        (should (looking-at-p "\\*\\*\\* MILESTONE Launch"))))))
+
+(ert-deftest org-linear-project-test-roadmap-all ()
+  "The first choice shows every open project, and no finished one."
+  (org-linear-project-test--with-plan
+    (org-linear-project-test--answering '(("Roadmap of" . "(all open projects)"))
+      (org-linear-roadmap))
+    (with-current-buffer "*org-linear roadmap*"
+      (let ((text (buffer-string)))
+        (should (string-match-p "■ Big" text))
+        (should (string-match-p "■ Garden" text))
+        (should-not (string-match-p "Finished" text))))))
 
 (provide 'org-linear-test)
 ;;; org-linear-test.el ends here

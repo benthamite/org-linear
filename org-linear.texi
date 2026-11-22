@@ -36,6 +36,7 @@ This manual describes the features and customization options for the Emacs Lisp 
 * Transient menu::
 * User options::
 * The in-place layout::
+* Working with projects::
 * Limits::
 * Indices::
 
@@ -371,6 +372,15 @@ Add @code{org-linear-file} to @code{org-agenda-files} to see your issues' deadli
 @item @samp{e}
 @tab @code{org-linear-end-stalled-sync}
 @tab End a sync that has stalled
+@item @samp{n}
+@tab @code{org-linear-project-create}
+@tab Add a project heading
+@item @samp{r}
+@tab @code{org-linear-roadmap}
+@tab Show a project's roadmap
+@item @samp{w}
+@tab @code{org-linear-project-context}
+@tab Show what the heading at point serves
 @end multitable
 
 Every key is always shown; @samp{b}@comma{} @samp{t}@comma{} @samp{c} and @samp{p} act on the issue at point@comma{} in the file or in the list of your issues. The @samp{a} key shows whether the mode is on@comma{} and the menu stays open after you press it.
@@ -626,6 +636,55 @@ Initiatives must be turned on in Linear@comma{} under Settings@comma{} Initiativ
 @end lisp
 
 Turning the options on makes the next sync read every file again and send the relations of the issues already linked@comma{} so expect that sync to be a large one.
+
+@node Working with projects
+@chapter Working with projects
+
+A task says what to do; a project says what state of the world to reach. With @code{org-linear-project-keywords} and @code{org-linear-milestone-keywords} set (@ref{Projects initiatives and milestones, , Projects@comma{} initiatives and milestones})@comma{} three commands help you work with projects rather than only with tasks: one creates a project@comma{} one shows where projects stand@comma{} and one shows what a task is for. They read the headings of a profile: its project headings are those with a project keyword or linked to a Linear project or initiative@comma{} and its milestone headings those with a milestone keyword or linked to a milestone. Each command works on the profile of the current buffer@comma{} or on the only profile with projects; with a prefix argument@comma{} it asks.
+
+In the in-place layout@comma{} the commands read the files that the last sync found holding Linear IDs or headings to create@comma{} the files open in Emacs@comma{} and @code{org-linear-project-file}. A project heading in a file that has never synced@comma{} and is not open@comma{} shows up after the next sync. In the mirror layout@comma{} they read @code{org-linear-file}@comma{} whose top-level headings are the projects.
+
+@findex org-linear-project-create
+@vindex org-linear-project-file
+@vindex org-linear-project-directory-property
+@samp{M-x org-linear-project-create} adds a project. It asks for:
+
+@itemize
+@item
+the name;
+@item
+the outcome@comma{} the end state the project aims at@comma{} which goes in the @samp{OUTCOME} property and so becomes the Linear project's summary (leave it empty for none);
+@item
+the parent project@comma{} among the open ones@comma{} by default the project at point; with none@comma{} the project goes at the end of @code{org-linear-project-file}@comma{} or of the current file if that option is @samp{nil}@comma{} and the file must be one the profile syncs;
+@item
+the target date@comma{} read as Org reads dates@comma{} so @samp{+3w} and @samp{dec 15} work@comma{} which becomes the heading's @samp{DEADLINE} (leave it empty for none);
+@item
+with @code{org-linear-project-directory-property} set to a property name@comma{} whether the project has a directory of its own@comma{} and which. A directory that another project heading already names is refused.
+@end itemize
+
+The heading gets the first of @code{org-linear-project-keywords} and goes last under its parent; the file is saved@comma{} and the next sync creates the project in Linear. Then add its milestones under it as headings with a milestone keyword@comma{} each with a @samp{DEADLINE} and@comma{} in its body@comma{} what has to be true for it to count as reached@comma{} and put tasks under the milestones they serve.
+
+@findex org-linear-roadmap
+@samp{M-x org-linear-roadmap} shows a project's roadmap. It asks for the project@comma{} by default the one at point; the first choice shows every open project instead. Under each project come its milestones and then its open subprojects@comma{} each sorted by target date@comma{} with those without one last. Each line gives:
+
+@itemize
+@item
+the target date and the days left;
+@item
+the tasks done and the tasks in all@comma{} sub-tasks and the tasks of subprojects included@comma{} with a bar;
+@item
+warnings: @samp{overdue} for an open project or milestone past its date@comma{} @samp{due after its project} for one whose date is later than its project's@comma{} and @samp{no open tasks} for an open milestone that holds no open task@comma{} which is either reached or still needs tasks.
+@end itemize
+
+A project's outcome shows under its line@comma{} and a project with milestones or subprojects ends with the number of its open tasks in no milestone.
+
+@findex org-linear-roadmap-visit
+@findex org-linear-roadmap-browse
+@findex org-linear-roadmap-toggle-tasks
+In the roadmap@comma{} @samp{RET} visits the heading on the line@comma{} @samp{o} opens its project in Linear (Linear's own views include a timeline)@comma{} @samp{t} lists or hides the open tasks under each milestone and project@comma{} and @samp{g} reads the files again.
+
+@findex org-linear-project-context
+@samp{M-x org-linear-project-context}@comma{} from a heading in Org or a line of an agenda@comma{} shows what the heading serves: its milestone and every project above it@comma{} the nearest first@comma{} each with its target date and outcome. Choose one to visit it.
 
 @node Limits
 @chapter Limits
