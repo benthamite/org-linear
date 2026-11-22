@@ -684,7 +684,7 @@ A project's outcome shows under its line@comma{} and a project with milestones o
 In the roadmap@comma{} @samp{RET} visits the heading on the line@comma{} @samp{o} opens its project in Linear (Linear's own views include a timeline)@comma{} @samp{t} lists or hides the open tasks under each milestone and project@comma{} and @samp{g} reads the files again.
 
 @findex org-linear-project-context
-@samp{M-x org-linear-project-context}@comma{} from a heading in Org or a line of an agenda@comma{} shows what the heading serves: its milestone and every project above it@comma{} the nearest first@comma{} each with its target date and outcome. Choose one to visit it.
+@samp{M-x org-linear-project-context}@comma{} from a heading in Org or a line of an agenda@comma{} shows what the heading serves: its milestone and every project above it@comma{} the nearest first@comma{} each with its target date and outcome. Choose one to visit it. On a milestone or project heading the list starts above it@comma{} since a milestone serves its project and a subproject the projects above it; on a top-level project@comma{} which serves no other@comma{} the echo area says so and shows its outcome.
 
 @node Limits
 @chapter Limits

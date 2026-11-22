@@ -420,26 +420,26 @@ Signal an error unless the profile in effect syncs it."
 The heading is the one at point in an Org buffer or on an agenda line.
 The prompt lists the nearest milestone and each project above it, the
 nearest first, with its outcome and target date; the one you choose is
-visited."
+visited.  On a milestone or project heading, the list starts above it:
+a milestone serves its project, and a subproject the projects above
+it.  A top-level project serves none, which the echo area says, with its
+outcome."
   (interactive)
   (let ((place (or (org-linear-project--point-place)
                    (user-error "Point is on no Org heading"))))
     (org-linear--with-profile (org-linear-project--profile)
-      (let* ((chain (org-linear-project--chain (org-linear-project--forest) place))
-             (choices (mapcar (lambda (node) (cons (org-linear-project--describe node) node))
+      (let* ((node (or (org-linear-project--node-at (org-linear-project--forest) place)
+                       (user-error "The heading at point is in no project")))
+             (chain (org-linear-project--chain-from (plist-get node :parent)))
+             (choices (mapcar (lambda (above) (cons (org-linear-project--describe above) above))
                               chain)))
-        (unless chain
-          (user-error "The heading at point is in no project"))
-        (org-linear-project--goto
-         (cdr (assoc (completing-read "Go to: " choices nil t nil nil (caar choices))
-                     choices)))))))
-
-(defun org-linear-project--chain (nodes place)
-  "Return the milestone and projects above PLACE among NODES, the nearest first.
-PLACE is (FILE . POS).  A milestone or project heading at PLACE counts."
-  (when-let* ((node (org-linear-project--node-at nodes place)))
-    (org-linear-project--chain-from
-     (if (eq (plist-get node :kind) 'task) (plist-get node :parent) node))))
+        (if (null chain)
+            (message "%s is a top-level project; it serves no other"
+                     (org-linear-project--describe node))
+          (org-linear-project--goto
+           (cdr (assoc (completing-read "Serves, nearest first: " choices nil t nil nil
+                                        (caar choices))
+                       choices))))))))
 
 (defun org-linear-project--chain-from (node)
   "Return NODE and the nodes above it, the nearest first."

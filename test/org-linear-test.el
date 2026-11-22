@@ -4554,6 +4554,31 @@ ANSWERS is an alist from a regexp matching a prompt to the answer."
                                  "Project: Big — Everything ships")))
         (should (looking-at-p "\\*\\* PROJECT Site"))))))
 
+(ert-deftest org-linear-project-test-context-of-project-and-milestone-headings ()
+  "On a milestone or project heading, the chain starts above it.
+A top-level project serves none, and the echo area says so."
+  (org-linear-project-test--with-plan
+    (with-current-buffer (find-file-noselect (expand-file-name "plan.org" org-linear-test--notes))
+      (let (offered)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt choices &rest _)
+                     (setq offered (mapcar #'car choices))
+                     (car offered))))
+          (goto-char (point-min))
+          (re-search-forward "MILESTONE Launch")
+          (org-linear-project-context)
+          (should (equal offered '("Project: Site (due 2099-12-01)"
+                                   "Project: Big — Everything ships")))
+          (goto-char (point-min))
+          (re-search-forward "PROJECT Site")
+          (org-linear-project-context)
+          (should (equal offered '("Project: Big — Everything ships")))
+          (setq offered nil)
+          (goto-char (point-min))
+          (should (equal (org-linear-project-context)
+                         "Project: Big — Everything ships is a top-level project; it serves no other"))
+          (should-not offered))))))
+
 (ert-deftest org-linear-project-test-context-outside-projects ()
   "A heading in no project has no context."
   (org-linear-project-test--with-plan
