@@ -3210,6 +3210,37 @@ DEADLINE: <2026-12-01 Tue>
       (org-linear-test--sync)
       (should-not (org-linear-test--hierarchy-writes)))))
 
+(ert-deftest org-linear-test-hierarchy-outcome-both-ways ()
+  "A project heading's outcome syncs with the short summary, both ways."
+  (org-linear-test--with-hierarchy
+      '(("plan.org" . "* PROJECT Site\n:PROPERTIES:\n:OUTCOME: People can buy online\n:END:\nAbout the site.\n** TODO Copy\n* PROJECT Big\n:PROPERTIES:\n:OUTCOME: Everything ships\n:END:\n** PROJECT Small\n*** TODO Task\n"))
+    (org-linear-test--sync-until-quiet)
+    (let ((site (org-linear-test--id-named org-linear-test--projects "Site")))
+      (should (equal (alist-get 'description (gethash site org-linear-test--projects))
+                     "People can buy online"))
+      (should (equal (alist-get 'content (gethash site org-linear-test--projects))
+                     "About the site."))
+      (should (equal (alist-get 'description
+                                (org-linear-test--named org-linear-test--initiatives "Big"))
+                     "Everything ships"))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes))
+      ;; Linear to Org.
+      (org-linear-test--put-object org-linear-test--projects site nil
+                                   '((description . "Shop is live")))
+      (org-linear-test--sync)
+      (should (equal (org-linear-test--property-of "plan.org" "Site" "OUTCOME") "Shop is live"))
+      ;; Org to Linear: removing the property clears the summary.
+      (org-linear-test--edit-note "plan.org"
+        (lambda ()
+          (re-search-forward "^\\* PROJECT Site")
+          (org-entry-delete nil "OUTCOME")))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash site org-linear-test--projects)) ""))
+      (should-not (org-linear-test--property-of "plan.org" "Site" "OUTCOME"))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--hierarchy-writes)))))
+
 (ert-deftest org-linear-test-hierarchy-conflict ()
   "When both sides rename a project, the conflict winner's title stays."
   (org-linear-test--with-hierarchy '(("plan.org" . "* PROJECT Site\n** TODO Copy\n"))

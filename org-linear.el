@@ -472,6 +472,14 @@ manual."
   :type '(repeat string)
   :group 'org-linear)
 
+(defcustom org-linear-outcome-property "OUTCOME"
+  "Property of a project heading that states the outcome the project aims at.
+In the in-place layout it syncs both ways with the short summary of the
+heading's Linear project or initiative, while the heading's body is the
+longer overview.  See `org-linear-project-create'."
+  :type 'string
+  :group 'org-linear)
+
 ;;;; Profiles
 
 (defcustom org-linear-profiles nil
@@ -3138,6 +3146,22 @@ Unlike `org-deadline', this leaves the CLOSED line and logs nothing."
     (unless (bolp) (insert "\n"))
     (unless (string-blank-p body)
       (insert body "\n"))))
+
+(defun org-linear--heading-outcome ()
+  "Return the outcome of the project heading at point, or nil.
+It is the value of `org-linear-outcome-property'."
+  (org-linear--outcome-value (org-entry-get nil org-linear-outcome-property)))
+
+(defun org-linear--outcome-value (text)
+  "Return TEXT, an outcome, trimmed, or nil when it is nil or blank."
+  (and text (not (string-blank-p text)) (string-trim text)))
+
+(defun org-linear--set-heading-outcome (outcome)
+  "Set the outcome of the project heading at point to OUTCOME.
+Nil removes it."
+  (if outcome
+      (org-entry-put nil org-linear-outcome-property outcome)
+    (org-entry-delete nil org-linear-outcome-property)))
 
 (defun org-linear--set-static-properties (marker task)
   "Set the read-only properties of the heading at MARKER from TASK."

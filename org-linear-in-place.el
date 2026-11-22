@@ -1913,9 +1913,9 @@ since a milestone belongs to one project."
 ;;;; The hierarchy: fetching objects
 
 (defconst org-linear-in-place--object-fields
-  '((project . "id name content targetDate updatedAt trashed url status { id type }
+  '((project . "id name description content targetDate updatedAt trashed url status { id type }
 initiativeToProjects { nodes { id initiative { id } } }")
-    (initiative . "id name content targetDate updatedAt trashed url status
+    (initiative . "id name description content targetDate updatedAt trashed url status
 parentInitiative { id }")
     (milestone . "id name description targetDate updatedAt project { id }"))
   "The fields the sync reads of each kind of Linear object.")
@@ -1993,7 +1993,8 @@ whether the workspace has initiatives turned on, come along into
   "Return NODE, a Linear object of KIND as GraphQL gives it, as the sync uses it.
 That is a plist: :kind, :id, :title, :md (its Markdown description),
 :deadline, :edited and :trashed; for a project and an initiative, its
-:status, `open', `done' or `canceled'; for a project its :links to
+:status, `open', `done' or `canceled', and its :outcome, the short
+summary, or nil when it has none; for a project its :links to
 initiatives, (LINK-ID . INITIATIVE-ID); for an initiative its :parent;
 for a milestone its :project."
   (append
@@ -2004,6 +2005,8 @@ for a milestone its :project."
          :deadline (alist-get 'targetDate node)
          :edited (alist-get 'updatedAt node)
          :trashed (eq (alist-get 'trashed node) t))
+   (unless (eq kind 'milestone)
+     (list :outcome (org-linear--outcome-value (alist-get 'description node))))
    (pcase kind
      ('project
       (list :status (pcase (alist-get 'type (alist-get 'status node))
@@ -2196,7 +2199,7 @@ edits.  CONVERTED maps conversion keys to Org text."
 As with an issue, a field changed on one side takes that side's value,
 and `org-linear-conflict-winner' decides when both changed.  The fields
 are the title, the body, the deadline and, but for a milestone, the
-status.  CONVERTED maps conversion keys to Org text."
+status and the outcome.  CONVERTED maps conversion keys to Org text."
   (let* ((id (plist-get object :id))
          (kind (plist-get object :kind))
          (stored (gethash id (org-linear--state-objects)))
@@ -2253,7 +2256,7 @@ status.  CONVERTED maps conversion keys to Org text."
   "Return the fields the merge compares for an object of KIND."
   (if (eq kind 'milestone)
       '(:title :body :deadline)
-    '(:title :body :deadline :status)))
+    '(:title :body :deadline :status :outcome)))
 
 (defun org-linear-in-place--object-view (node kind)
   "Return the KIND object of NODE's heading as Org field values."
@@ -2262,7 +2265,8 @@ status.  CONVERTED maps conversion keys to Org text."
                   :body (org-linear--body)
                   :deadline (org-linear--planning-date "DEADLINE"))
             (unless (eq kind 'milestone)
-              (list :status (org-linear-in-place--status (org-get-todo-state)))))))
+              (list :status (org-linear-in-place--status (org-get-todo-state))
+                    :outcome (org-linear--heading-outcome))))))
 
 (defun org-linear-in-place--object-remote-view (object converted base held)
   "Return OBJECT from Linear as Org field values.
@@ -2278,7 +2282,8 @@ when the description is unchanged, or HELD back."
                     (plist-get base :body)
                     "")
           :deadline (plist-get object :deadline)
-          :status (plist-get object :status))))
+          :status (plist-get object :status)
+          :outcome (plist-get object :outcome))))
 
 (defun org-linear-in-place--remote-relations (object local base)
   "Return the relations OBJECT has in Linear, a plist like LOCAL.
@@ -2324,7 +2329,8 @@ sent as a canceled workflow state, and `done' for any other done one."
       (:title (org-edit-headline value))
       (:body (org-linear--set-body value))
       (:deadline (org-linear--set-planning 'deadline value))
-      (:status (org-linear--set-todo (org-linear-in-place--status-keyword value) nil)))))
+      (:status (org-linear--set-todo (org-linear-in-place--status-keyword value) nil))
+      (:outcome (org-linear--set-heading-outcome value)))))
 
 ;;;; The hierarchy: creating objects
 
@@ -2494,6 +2500,8 @@ property, so that a lost answer is found by the next sync."
               ('milestone `((projectId . ,(plist-get (plist-get op :relations) :project)))))
             (when (plist-get view :deadline)
               `((targetDate . ,(plist-get view :deadline))))
+            (when (plist-get view :outcome)
+              `((description . ,(plist-get view :outcome))))
             (when-let* ((status (and (plist-get view :status)
                                      (org-linear-in-place--status-input
                                       kind (plist-get view :status)))))
@@ -2598,6 +2606,7 @@ write is refused if it changed since the sync read it."
                                    (pcase (car field)
                                      (:title `(name . ,(cdr field)))
                                      (:deadline `(targetDate . ,(or (cdr field) :null)))
+                                     (:outcome `(description . ,(or (cdr field) "")))
                                      (:status (org-linear-in-place--status-input
                                                kind (cdr field)))))
                                  fields)))
