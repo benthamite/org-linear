@@ -108,6 +108,9 @@ The form rejects valid email addresses with a plus sign.
 
 The identifier, the issue's internal ID and its URL are kept in the =LINEAR_ID=, =LINEAR_UUID= and =LINEAR_URL= properties. The sync maintains them; do not edit them.
 
+#+vindex: org-linear-outcome-property
+A project's heading holds its ID in =LINEAR_PROJECT=. Its =OUTCOME= property (~org-linear-outcome-property~) is the project's summary, the one line stating the end state it aims at, and its =DEADLINE= the project's target date. These two merge both ways as an issue's fields do; removing the property clears the summary. The project's name follows Linear: renaming the heading does not rename the project.
+
 Tags that name neither a team member nor a label are yours: the sync leaves them alone and never sends them. A label's tag is its name with every character Org does not allow in tags replaced by =_=, so the label =requested-by:peter= becomes the tag =requested_by_peter=. A tag you add sends the label of that name that the issue's team can use; if several can, it is logged and not sent.
 
 Linear issues have no start date, so by default =SCHEDULED= is not synced: use it freely to defer an issue in your own agenda.
@@ -516,11 +519,11 @@ In the in-place layout, the commands read the files that the last sync found hol
 
 - the name;
 - the outcome, the end state the project aims at, which goes in the =OUTCOME= property and so becomes the Linear project's summary (leave it empty for none);
-- the parent project, among the open ones, by default the project at point; with none, the project goes at the end of ~org-linear-project-file~, or of the current file if that option is =nil=, and the file must be one the profile syncs;
+- in the in-place layout, the parent project, among the open ones, by default the project at point; with none, the project goes at the end of ~org-linear-project-file~, or of the current file if that option is =nil=, and the file must be one the profile syncs;
 - the target date, read as Org reads dates, so =+3w= and =dec 15= work, which becomes the heading's =DEADLINE= (leave it empty for none);
-- with ~org-linear-project-directory-property~ set to a property name, whether the project has a directory of its own, and which. A directory that another project heading already names is refused.
+- in the in-place layout with ~org-linear-project-directory-property~ set to a property name, whether the project has a directory of its own, and which. A directory that another project heading already names is refused.
 
-The heading gets the first of ~org-linear-project-keywords~ and goes last under its parent; the file is saved, and the next sync creates the project in Linear. Then add its milestones under it as headings with a milestone keyword, each with a =DEADLINE= and, in its body, what has to be true for it to count as reached, and put tasks under the milestones they serve.
+In the in-place layout the heading gets the first of ~org-linear-project-keywords~ and goes last under its parent; the file is saved, and the next sync creates the project in Linear. In the mirror layout, where Linear is the primary copy, the command creates the project in Linear at once, in the team you choose if the file mirrors several, and adds its heading at the end of the file once Linear confirms it; the file must have no unsaved edits. You can edit the heading's outcome and date at once: the next sync sends them. A mirrored project has no parent or directory, since the file's projects are its top-level headings. Then add its milestones under it as headings with a milestone keyword, each with a =DEADLINE= and, in its body, what has to be true for it to count as reached, and put tasks under the milestones they serve.
 
 #+findex: org-linear-roadmap
 =M-x org-linear-roadmap= shows a project's roadmap. It asks for the project, by default the one at point; the first choice shows every open project instead. Under each project come its milestones and then its open subprojects, each sorted by target date, with those without one last. Each line gives:

@@ -184,6 +184,9 @@ The form rejects valid email addresses with a plus sign.
 
 The identifier@comma{} the issue's internal ID and its URL are kept in the @samp{LINEAR_ID}@comma{} @samp{LINEAR_UUID} and @samp{LINEAR_URL} properties. The sync maintains them; do not edit them.
 
+@vindex org-linear-outcome-property
+A project's heading holds its ID in @samp{LINEAR_PROJECT}. Its @samp{OUTCOME} property (@code{org-linear-outcome-property}) is the project's summary@comma{} the one line stating the end state it aims at@comma{} and its @samp{DEADLINE} the project's target date. These two merge both ways as an issue's fields do; removing the property clears the summary. The project's name follows Linear: renaming the heading does not rename the project.
+
 Tags that name neither a team member nor a label are yours: the sync leaves them alone and never sends them. A label's tag is its name with every character Org does not allow in tags replaced by @samp{_}@comma{} so the label @samp{requested-by:peter} becomes the tag @samp{requested_by_peter}. A tag you add sends the label of that name that the issue's team can use; if several can@comma{} it is logged and not sent.
 
 Linear issues have no start date@comma{} so by default @samp{SCHEDULED} is not synced: use it freely to defer an issue in your own agenda.
@@ -655,14 +658,14 @@ the name;
 @item
 the outcome@comma{} the end state the project aims at@comma{} which goes in the @samp{OUTCOME} property and so becomes the Linear project's summary (leave it empty for none);
 @item
-the parent project@comma{} among the open ones@comma{} by default the project at point; with none@comma{} the project goes at the end of @code{org-linear-project-file}@comma{} or of the current file if that option is @samp{nil}@comma{} and the file must be one the profile syncs;
+in the in-place layout@comma{} the parent project@comma{} among the open ones@comma{} by default the project at point; with none@comma{} the project goes at the end of @code{org-linear-project-file}@comma{} or of the current file if that option is @samp{nil}@comma{} and the file must be one the profile syncs;
 @item
 the target date@comma{} read as Org reads dates@comma{} so @samp{+3w} and @samp{dec 15} work@comma{} which becomes the heading's @samp{DEADLINE} (leave it empty for none);
 @item
-with @code{org-linear-project-directory-property} set to a property name@comma{} whether the project has a directory of its own@comma{} and which. A directory that another project heading already names is refused.
+in the in-place layout with @code{org-linear-project-directory-property} set to a property name@comma{} whether the project has a directory of its own@comma{} and which. A directory that another project heading already names is refused.
 @end itemize
 
-The heading gets the first of @code{org-linear-project-keywords} and goes last under its parent; the file is saved@comma{} and the next sync creates the project in Linear. Then add its milestones under it as headings with a milestone keyword@comma{} each with a @samp{DEADLINE} and@comma{} in its body@comma{} what has to be true for it to count as reached@comma{} and put tasks under the milestones they serve.
+In the in-place layout the heading gets the first of @code{org-linear-project-keywords} and goes last under its parent; the file is saved@comma{} and the next sync creates the project in Linear. In the mirror layout@comma{} where Linear is the primary copy@comma{} the command creates the project in Linear at once@comma{} in the team you choose if the file mirrors several@comma{} and adds its heading at the end of the file once Linear confirms it; the file must have no unsaved edits. You can edit the heading's outcome and date at once: the next sync sends them. A mirrored project has no parent or directory@comma{} since the file's projects are its top-level headings. Then add its milestones under it as headings with a milestone keyword@comma{} each with a @samp{DEADLINE} and@comma{} in its body@comma{} what has to be true for it to count as reached@comma{} and put tasks under the milestones they serve.
 
 @findex org-linear-roadmap
 @samp{M-x org-linear-roadmap} shows a project's roadmap. It asks for the project@comma{} by default the one at point; the first choice shows every open project instead. Under each project come its milestones and then its open subprojects@comma{} each sorted by target date@comma{} with those without one last. Each line gives:

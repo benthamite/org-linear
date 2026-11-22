@@ -48,16 +48,19 @@ and the buffer belongs to none of them, ask."
   (let ((candidates (seq-filter #'org-linear-project--profile-has-projects-p
                                 (org-linear--profile-names))))
     (cond
-     ((null candidates) (user-error "No profile has project or milestone keywords"))
+     ((null candidates) (user-error "No profile has projects"))
      (ask (org-linear-project--read-profile candidates))
      ((seq-find (lambda (name) (org-linear-project--buffer-in-profile-p name)) candidates))
      ((null (cdr candidates)) (car candidates))
      (t (org-linear-project--read-profile candidates)))))
 
 (defun org-linear-project--profile-has-projects-p (name)
-  "Return non-nil if profile NAME syncs projects or milestones."
+  "Return non-nil if profile NAME has projects.
+A mirror always has; an in-place profile has when it syncs projects or
+milestones."
   (org-linear--with-profile name
-    (or org-linear-project-keywords org-linear-milestone-keywords)))
+    (or (not (eq org-linear-layout 'in-place))
+        org-linear-project-keywords org-linear-milestone-keywords)))
 
 (defun org-linear-project--read-profile (names)
   "Ask for one of the profiles NAMES and return it."
@@ -304,33 +307,117 @@ Point is in an Org buffer or on an agenda line."
 
 ;;;###autoload
 (defun org-linear-project-create (&optional ask-profile)
-  "Add a project heading, asking for its name, outcome, parent and target date.
-The heading gets the first of `org-linear-project-keywords', its outcome
-as `org-linear-outcome-property' and its target date as its deadline.
-It goes under the parent you choose, as its last subheading, or else at
-the end of `org-linear-project-file', or of the current file if that
-option is nil.  With `org-linear-project-directory-property' set, it can
-also name the project's directory.  The file is saved, and the next sync
-creates the project in Linear.  With a prefix argument ASK-PROFILE, ask
-for the profile."
+  "Add a project, asking for its name, outcome, parent and target date.
+The outcome goes in `org-linear-outcome-property' and the target date in
+the heading's deadline.  With a prefix argument ASK-PROFILE, ask for
+the profile.
+
+In the in-place layout, where Org is the primary copy, the heading gets
+the first of `org-linear-project-keywords' and goes under the parent you
+choose, as its last subheading, or else at the end of
+`org-linear-project-file', or of the current file if that option is nil.
+With `org-linear-project-directory-property' set, it can also name the
+project's directory.  The file is saved, and the next sync creates the
+project in Linear.
+
+In the mirror layout, where Linear is the primary copy and projects are
+the top-level headings of `org-linear-file', the project is created in
+Linear at once, in the team you choose if there are several, and its
+heading is added at the end of the file, which is saved.  A mirrored
+project has no parent and no directory."
   (interactive "P")
   (let ((profile (org-linear-project--profile ask-profile)))
     (org-linear--with-profile profile
-      (unless (and (eq org-linear-layout 'in-place) org-linear-project-keywords)
-        (user-error "Creating projects needs the in-place layout and `org-linear-project-keywords'"))
-      (let* ((nodes (org-linear-project--forest))
-             (open (seq-remove (lambda (node) (plist-get node :done))
-                               (org-linear-project--flatten nodes 'project)))
-             (name (org-linear-project--read-name))
-             (outcome (org-linear--outcome-value
-                       (read-string "Outcome, the end state it aims at (empty for none): ")))
-             (parent (org-linear-project--read-parent open (org-linear-project--enclosing nodes)))
-             (deadline (org-linear-project--read-date))
-             (directory (org-linear-project--read-directory nodes)))
-        (org-linear-project--insert
-         (list :name name :outcome outcome :parent parent :deadline deadline
-               :directory directory))
-        (message "Added the project \"%s\"; the next sync creates it in Linear" name)))))
+      (if (eq org-linear-layout 'in-place)
+          (org-linear-project--create-in-place)
+        (org-linear-project--create-in-linear)))))
+
+(defun org-linear-project--create-in-place ()
+  "Add a project heading in the in-place layout, asking for its fields."
+  (unless org-linear-project-keywords
+    (user-error "Creating projects in place needs `org-linear-project-keywords'"))
+  (let* ((nodes (org-linear-project--forest))
+         (open (seq-remove (lambda (node) (plist-get node :done))
+                           (org-linear-project--flatten nodes 'project)))
+         (name (org-linear-project--read-name))
+         (outcome (org-linear-project--read-outcome))
+         (parent (org-linear-project--read-parent open (org-linear-project--enclosing nodes)))
+         (deadline (org-linear-project--read-date))
+         (directory (org-linear-project--read-directory nodes)))
+    (org-linear-project--insert
+     (list :name name :outcome outcome :parent parent :deadline deadline
+           :directory directory))
+    (message "Added the project \"%s\"; the next sync creates it in Linear" name)))
+
+(defun org-linear-project--create-in-linear ()
+  "Create a project in Linear for the mirror layout, asking for its fields.
+Its heading is added to `org-linear-file' once Linear confirms it."
+  (let ((buffer (find-file-noselect org-linear-file)))
+    (when (buffer-modified-p buffer)
+      (user-error "Save %s first" (buffer-name buffer)))
+    (let* ((team (org-linear-project--read-team))
+           (spec (list :name (org-linear-project--read-name)
+                       :outcome (org-linear-project--read-outcome)
+                       :deadline (org-linear-project--read-date)))
+           (view (list :title (plist-get spec :name) :body ""
+                       :deadline (plist-get spec :deadline)
+                       :outcome (plist-get spec :outcome))))
+      (message "Creating the project \"%s\" in Linear..." (plist-get spec :name))
+      (org-linear--graphql
+       (org-linear-in-place--mutation 'project 'create)
+       `((input . ,(org-linear-in-place--create-input
+                    (list :kind 'project :pending (org-id-uuid) :team team :view view) "")))
+       (org-linear--bound
+        (lambda (data)
+          (let* ((object (org-linear-in-place--object
+                          'project (org-linear-in-place--payload 'project :create data)))
+                 (id (plist-get object :id)))
+            (org-linear-project--record-mirrored object)
+            (org-linear-project--insert-mirrored buffer id spec)
+            (message "Created the project \"%s\" in Linear" (plist-get spec :name)))))
+       (lambda (message &rest _)
+         (message "Linear did not create the project \"%s\": %s"
+                  (plist-get spec :name) message))))))
+
+(defun org-linear-project--read-team ()
+  "Return the ID of the team a new project goes in, asking if there are several.
+The teams are those the last sync read; signal an error before any."
+  (let ((teams (or (plist-get org-linear--meta :teams)
+                   (user-error "Sync once first, so that the teams are known"))))
+    (alist-get 'id (if (cdr teams)
+                       (let ((key (completing-read "Team: " (mapcar (lambda (team) (alist-get 'key team))
+                                                                    teams)
+                                                   nil t)))
+                         (seq-find (lambda (team) (equal (alist-get 'key team) key)) teams))
+                     (car teams)))))
+
+(defun org-linear-project--record-mirrored (object)
+  "Record OBJECT, a project just created, as last synced.
+Without this, the next sync would take its heading's fields, as edited
+meanwhile, for the last synced ones, and Linear's values would replace
+them."
+  (puthash (plist-get object :id)
+           (list :kind 'project :outcome (plist-get object :outcome)
+                 :deadline (plist-get object :deadline) :edited (plist-get object :edited))
+           (org-linear--state-objects))
+  (org-linear--save-state))
+
+(defun org-linear-project--insert-mirrored (buffer id spec)
+  "Add to BUFFER, the mirrored file, the heading of the new project ID.
+SPEC gives its :name, :outcome and :deadline.  BUFFER is saved."
+  (with-current-buffer buffer
+    (org-with-wide-buffer
+     (goto-char (point-max))
+     (unless (bolp) (insert "\n"))
+     (insert "* " (plist-get spec :name) "\n:PROPERTIES:\n:LINEAR_PROJECT: " id "\n:END:\n")
+     (org-back-to-heading t)
+     (org-linear-project--fill-heading spec))
+    (save-buffer)))
+
+(defun org-linear-project--read-outcome ()
+  "Ask for the outcome of a new project and return it, or nil for none."
+  (org-linear--outcome-value
+   (read-string "Outcome, the end state it aims at (empty for none): ")))
 
 (defun org-linear-project--read-name ()
   "Ask for the name of a new project and return it."

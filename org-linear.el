@@ -1384,16 +1384,46 @@ set are fetched too, so that their edits still sync."
    `((keys . ,(vconcat org-linear-teams)))
    (lambda (meta)
      (setq org-linear--meta (org-linear--parse-meta meta))
-     (org-linear--fetch-milestones
-      nil nil
+     (org-linear--fetch-project-fields
+      nil
       (lambda ()
-        (org-linear--fetch-issues
-         (org-linear--scope-filter) nil nil
-         (lambda (issues)
-           (org-linear--fetch-missing
-            buffer issues
-            (lambda (all)
-              (funcall callback (org-linear--normalize all)))))))))))
+        (org-linear--fetch-milestones
+         nil nil
+         (lambda ()
+           (org-linear--fetch-issues
+            (org-linear--scope-filter) nil nil
+            (lambda (issues)
+              (org-linear--fetch-missing
+               buffer issues
+               (lambda (all)
+                 (funcall callback (org-linear--normalize all)))))))))))))
+
+(defun org-linear--fetch-project-fields (after callback)
+  "Add their summary, target date and last edit to the projects in the metadata.
+The projects are those `org-linear--meta' holds.  Fetch the fields from
+cursor AFTER, a page at a time, then call CALLBACK.  The
+metadata query cannot hold these fields: with them, Linear refuses it as
+too complex (seen on 2026-11-22).  Only the mirror layout fetches them;
+otherwise CALLBACK is called at once."
+  (if (eq org-linear-layout 'in-place)
+      (funcall callback)
+    (org-linear--graphql
+     "query OrgLinearProjectFields($keys: [String!], $after: String) {
+  projects(first: 50, after: $after,
+    filter: { accessibleTeams: { some: { key: { in: $keys } } } }) {
+    pageInfo { hasNextPage endCursor } nodes { id description targetDate updatedAt } } }"
+     `((keys . ,(vconcat org-linear-teams)) (after . ,(or after :null)))
+     (lambda (data)
+       (let* ((page (alist-get 'projects data))
+              (info (alist-get 'pageInfo page)))
+         (dolist (node (alist-get 'nodes page))
+           (when-let* ((project (seq-find (lambda (project)
+                                            (equal (alist-get 'id project) (alist-get 'id node)))
+                                          (plist-get org-linear--meta :projects))))
+             (nconc project (assq-delete-all 'id (copy-alist node)))))
+         (if (eq (alist-get 'hasNextPage info) t)
+             (org-linear--fetch-project-fields (alist-get 'endCursor info) callback)
+           (funcall callback)))))))
 
 (defun org-linear--fetch-milestones (after acc callback)
   "Fetch the milestones of the teams' projects from cursor AFTER onto ACC.
@@ -1507,7 +1537,10 @@ is called at once."
   (mapcar (lambda (project)
             `((id . ,(alist-get 'id project))
               (title . ,(alist-get 'name project))
-              (url . ,(alist-get 'url project))))
+              (url . ,(alist-get 'url project))
+              (outcome . ,(org-linear--outcome-value (alist-get 'description project)))
+              (deadline . ,(alist-get 'targetDate project))
+              (edited . ,(alist-get 'updatedAt project))))
           (plist-get org-linear--meta :projects)))
 
 (defun org-linear--task (issue)
@@ -2008,7 +2041,8 @@ whose state only takes Linear's last edit time and description."
                             (org-linear--creation-ops index)))
     (when (and org-linear--skipped-pending creations)
       (setq org-linear--rerun t))
-    (append object-ops ops creations)))
+    ;; Last, so that the project headings this pass inserted are merged too.
+    (append object-ops (org-linear--merge-projects projects index) ops creations)))
 
 (defun org-linear--refresh-quiet (task)
   "Record in TASK's state Linear's last edit and description, as a merge would."
@@ -3882,17 +3916,42 @@ fields do.  CONVERTED maps conversion keys to Org text."
          (local (org-linear--milestone-view marker))
          (remote (org-linear-in-place--object-remote-view milestone converted stored nil))
          (base (or stored (append (copy-sequence local) (list :kind 'milestone))))
-         (new-base (copy-sequence base))
          (named `((identifier . ,(format "milestone \"%s\"" (plist-get local :title)))))
-         pushed)
-    (dolist (field '(:title :deadline :body))
+         (merged (org-linear--merge-object-fields
+                  '(:title :deadline :body) local remote base named
+                  (lambda (field value) (org-linear--set-milestone-field marker field value))))
+         (new-base (car merged))
+         (pushed (cdr merged)))
+    (setq new-base (plist-put new-base :desc-md (plist-get milestone :md)))
+    (puthash id (plist-put new-base :edited (plist-get milestone :edited))
+             (org-linear--state-objects))
+    (when pushed
+      (let ((op (list :type 'object-update :kind 'milestone :id id
+                      :fields pushed :title (plist-get local :title))))
+        (if (member (org-linear--op-signature op) (plist-get new-base :rejected))
+            (progn (org-linear--log "Not sent again: Linear refused this edit of the milestone \"%s\""
+                                    (plist-get local :title))
+                   nil)
+          (list op))))))
+
+(defun org-linear--merge-object-fields (fields local remote base named set)
+  "Merge FIELDS of an object three-way; return (NEW-BASE . PUSHED).
+LOCAL, REMOTE and BASE are plists of the Org, Linear and last-synced
+values.  A field changed on one side takes that side's value, and
+`org-linear-conflict-winner' decides when both changed, logging the
+loser under NAMED, an alist naming the object.  SET is called with a
+field and Linear's value to write it into Org.  NEW-BASE is BASE with
+the merged values; PUSHED lists (FIELD . VALUE) to send, in order."
+  (let ((new-base (copy-sequence base))
+        pushed)
+    (dolist (field fields)
       (let ((l (plist-get local field))
             (r (plist-get remote field))
             (b (plist-get base field)))
         (cond
          ((equal l r) (setq new-base (plist-put new-base field r)))
          ((equal l b)
-          (org-linear--set-milestone-field marker field r)
+          (funcall set field r)
           (org-linear--count :pulled)
           (setq new-base (plist-put new-base field r)))
          ((equal r b) (push (cons field l) pushed))
@@ -3900,20 +3959,56 @@ fields do.  CONVERTED maps conversion keys to Org text."
           (org-linear--conflict named field r l)
           (push (cons field l) pushed))
          (t
-          (org-linear--set-milestone-field marker field r)
+          (funcall set field r)
           (org-linear--conflict named field l r)
           (setq new-base (plist-put new-base field r))))))
-    (setq new-base (plist-put new-base :desc-md (plist-get milestone :md)))
-    (puthash id (plist-put new-base :edited (plist-get milestone :edited))
-             (org-linear--state-objects))
-    (when pushed
-      (let ((op (list :type 'object-update :kind 'milestone :id id
-                      :fields (nreverse pushed) :title (plist-get local :title))))
-        (if (member (org-linear--op-signature op) (plist-get new-base :rejected))
-            (progn (org-linear--log "Not sent again: Linear refused this edit of the milestone \"%s\""
-                                    (plist-get local :title))
-                   nil)
-          (list op))))))
+    (cons new-base (nreverse pushed))))
+
+(defun org-linear--merge-projects (projects index)
+  "Merge the outcome and target date of PROJECTS with their headings in INDEX.
+Return the edits to send.  The outcome is the heading's
+`org-linear-outcome-property' and the target date its DEADLINE; they
+merge three-way as a milestone's fields do, the last synced values kept
+in the state's objects."
+  (let (edits)
+    (dolist (project projects)
+      (when-let* ((id (alist-get 'id project))
+                  (marker (gethash id (plist-get index :projects)))
+                  (edit (org-linear--merge-project project marker)))
+        (push edit edits)))
+    (nreverse edits)))
+
+(defun org-linear--merge-project (project marker)
+  "Merge PROJECT with its heading at MARKER; return the edit to send, or nil."
+  (let* ((id (alist-get 'id project))
+         (title (alist-get 'title project))
+         (local (org-with-point-at marker
+                  (list :outcome (org-linear--heading-outcome)
+                        :deadline (org-linear--planning-date "DEADLINE"))))
+         (remote (list :outcome (alist-get 'outcome project)
+                       :deadline (alist-get 'deadline project)))
+         (stored (gethash id (org-linear--state-objects)))
+         (base (or stored (append (copy-sequence local) (list :kind 'project))))
+         (merged (org-linear--merge-object-fields
+                  '(:outcome :deadline) local remote base
+                  `((identifier . ,(format "project \"%s\"" title)))
+                  (lambda (field value)
+                    (org-with-point-at marker
+                      (pcase field
+                        (:outcome (org-linear--set-heading-outcome value))
+                        (:deadline (org-linear--set-planning 'deadline value)))))))
+         (new-base (plist-put (car merged) :edited (alist-get 'edited project)))
+         (edit (and (cdr merged)
+                    (list :type 'object-update :kind 'project :id id
+                          :fields (cdr merged) :title title))))
+    (puthash id new-base (org-linear--state-objects))
+    (cond
+     ((null edit) nil)
+     ((member (org-linear--op-signature edit) (plist-get new-base :rejected))
+      (org-linear--log "Not sent again: Linear refused this edit of the project \"%s\"" title)
+      nil)
+     (t (require 'org-linear-in-place)
+        edit))))
 
 (defun org-linear--set-milestone-field (marker field value)
   "Set FIELD of the milestone heading at MARKER to VALUE."

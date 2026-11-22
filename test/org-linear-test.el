@@ -337,6 +337,17 @@ A string is an error message; nil means NAME is no object operation."
            (projectMilestones . ((nodes . ,(org-linear-test--select
                                             org-linear-test--milestones ids
                                             (lambda (id) (gethash id org-linear-test--milestones)))))))))
+      ("OrgLinearProjectFields"
+       ;; The board's projects, with the fields a test stored for them.
+       `((projects
+          . ((pageInfo . ((hasNextPage . :false) (endCursor . nil)))
+             (nodes . ,(mapcar (lambda (id)
+                                 (let ((project (gethash id org-linear-test--projects)))
+                                   `((id . ,id)
+                                     (description . ,(alist-get 'description project))
+                                     (targetDate . ,(alist-get 'targetDate project))
+                                     (updatedAt . ,(alist-get 'updatedAt project)))))
+                               '("p-a" "p-b")))))))
       ("OrgLinearProjectCreate"
        (org-linear-test--put-object org-linear-test--projects (alist-get 'id input)
                                     `((trashed . :false) (status . ,(org-linear-test--project-status "ps-backlog"))
@@ -3644,6 +3655,132 @@ It lands at LEVEL, as a user's refile would leave it."
       (org-linear-test--sync)
       (should-not (org-linear-test--hierarchy-writes))
       (should (equal (org-linear-test--text) text)))))
+
+(defun org-linear-test--project-heading-value (title getter)
+  "Return what GETTER returns at the mirrored file's project heading TITLE."
+  (with-current-buffer (find-buffer-visiting org-linear-file)
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (re-search-forward (format "^\\* %s$" (regexp-quote title)))
+     (funcall getter))))
+
+(defun org-linear-test--edit-project-heading (title edit)
+  "Call EDIT at the mirrored file's project heading TITLE, as the user, and save."
+  (with-current-buffer (find-buffer-visiting org-linear-file)
+    (org-linear-test--editing
+      (org-with-wide-buffer
+       (goto-char (point-min))
+       (re-search-forward (format "^\\* %s$" (regexp-quote title)))
+       (funcall edit))
+      (save-buffer))))
+
+(ert-deftest org-linear-test-mirror-project-outcome-and-date-both-ways ()
+  "In the mirror, a project's summary and target date sync with its heading."
+  (org-linear-test--with-board
+    (puthash "p-a" '((id . "p-a") (description . "Ship A") (targetDate . "2026-12-31")
+                     (updatedAt . "2026-10-30T09:00:00Z"))
+             org-linear-test--projects)
+    (org-linear-test--sync)
+    (let ((outcome (lambda () (org-entry-get nil "OUTCOME")))
+          (deadline (lambda () (org-linear--planning-date "DEADLINE"))))
+      ;; Linear to Org, on the first sync.
+      (should (equal (org-linear-test--project-heading-value "Project A" outcome) "Ship A"))
+      (should (equal (org-linear-test--project-heading-value "Project A" deadline) "2026-12-31"))
+      (should-not (org-linear-test--project-heading-value "Project B" outcome))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearProjectUpdate"))
+      ;; Org to Linear.
+      (org-linear-test--edit-project-heading
+       "Project A" (lambda ()
+                     (org-entry-put nil "OUTCOME" "Ship A well")
+                     (org-linear--set-planning 'deadline "2027-01-15")))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash "p-a" org-linear-test--projects))
+                     "Ship A well"))
+      (should (equal (alist-get 'targetDate (gethash "p-a" org-linear-test--projects))
+                     "2027-01-15"))
+      (org-linear-test--sync)
+      (should-not (org-linear-test--calls "OrgLinearProjectUpdate"))
+      ;; Linear to Org, after the first sync.
+      (org-linear-test--put-object org-linear-test--projects "p-a" nil
+                                   '((description . "From Linear")))
+      (org-linear-test--sync)
+      (should (equal (org-linear-test--project-heading-value "Project A" outcome) "From Linear"))
+      ;; A conflict: Linear wins in the mirror, and the log keeps Org's value.
+      (org-linear-test--put-object org-linear-test--projects "p-a" nil
+                                   '((description . "Linear's")))
+      (org-linear-test--edit-project-heading
+       "Project A" (lambda () (org-entry-put nil "OUTCOME" "Org's")))
+      (org-linear-test--sync)
+      (should (equal (org-linear-test--project-heading-value "Project A" outcome) "Linear's"))
+      (should (string-match-p "Org's" (org-linear-test--log)))
+      ;; Removing the property in Org clears the summary.
+      (org-linear-test--edit-project-heading
+       "Project A" (lambda () (org-entry-delete nil "OUTCOME")))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash "p-a" org-linear-test--projects)) "")))))
+
+(ert-deftest org-linear-test-mirror-project-create ()
+  "In the mirror, a new project is created in Linear and its heading added."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (cl-letf* ((answers '(("Project name" . "Project C") ("Outcome" . "C is done")
+                          ("Target date" . "2027-03-01")))
+               (answer (lambda (prompt &rest _)
+                         (cdr (seq-find (lambda (pair) (string-match-p (car pair) prompt))
+                                        answers))))
+               ((symbol-function 'read-string) answer))
+      (org-linear-project-create))
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (not (string-match-p "^\\* Project C$" (org-linear-test--text)))
+                  (< (float-time) deadline))
+        (accept-process-output nil 0.05)))
+    (let* ((created (seq-find (lambda (project) (equal (alist-get 'name project) "Project C"))
+                              (hash-table-values org-linear-test--projects)))
+           (id (alist-get 'id created)))
+      (should (equal (alist-get 'description created) "C is done"))
+      (should (equal (alist-get 'targetDate created) "2027-03-01"))
+      (should (equal (org-linear-test--project-heading-value
+                      "Project C" (lambda () (org-entry-get nil "LINEAR_PROJECT")))
+                     id))
+      (should (equal (org-linear-test--project-heading-value
+                      "Project C" (lambda () (org-entry-get nil "OUTCOME")))
+                     "C is done"))
+      (should-not (buffer-modified-p (find-buffer-visiting org-linear-file)))
+      (should (equal (org-linear-test--project-heading-value
+                      "Project C" (lambda () (org-linear--planning-date "DEADLINE")))
+                     "2027-03-01"))
+      ;; The next sync keeps the heading, though it holds no issue, and sends nothing.
+      (org-linear-test--sync)
+      (should (string-match-p "^\\* Project C$" (org-linear-test--text)))
+      (should-not (org-linear-test--calls "OrgLinearProjectUpdate")))))
+
+(ert-deftest org-linear-test-mirror-project-create-then-edit ()
+  "An outcome edited before the first sync after the creation is sent."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let ((id "p-a"))
+      ;; Project A stands for the new project, which the fake lists.
+      (puthash id '((id . "p-a") (description . "First") (updatedAt . "2026-10-30T09:00:00Z"))
+               org-linear-test--projects)
+      (org-linear-project--record-mirrored
+       (list :id id :outcome "First" :deadline nil :edited "2026-10-30T09:00:00Z"))
+      (org-linear-test--edit-project-heading
+       "Project A" (lambda () (org-entry-put nil "OUTCOME" "Edited at once")))
+      (org-linear-test--sync)
+      (should (equal (alist-get 'description (gethash id org-linear-test--projects))
+                     "Edited at once")))))
+
+(ert-deftest org-linear-test-mirror-project-create-refuses-unsaved-file ()
+  "A project is not created while the mirrored file has unsaved edits."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (with-current-buffer (find-buffer-visiting org-linear-file)
+      (goto-char (point-max))
+      (insert "unsaved\n"))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "Project C")))
+      (should-error (org-linear-project-create) :type 'user-error))
+    (should-not (org-linear-test--calls "OrgLinearProjectCreate"))))
 
 (ert-deftest org-linear-test-mirror-hierarchy-off-ignores-relations ()
   "Without milestone keywords, sub-issues stay level-2 headings and nothing is sent."
