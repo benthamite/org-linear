@@ -3755,6 +3755,19 @@ It lands at LEVEL, as a user's refile would leave it."
       (should (string-match-p "^\\* Project C$" (org-linear-test--text)))
       (should-not (org-linear-test--calls "OrgLinearProjectUpdate")))))
 
+(ert-deftest org-linear-test-project-profile-of-mirrored-file ()
+  "In the mirrored file, the default profile is chosen without asking.
+The default profile is nil, which a search for the buffer's profile must
+not take for none found."
+  (org-linear-test--with-board
+    (org-linear-test--sync)
+    (let ((org-linear-profiles '((other :layout in-place :directories ("/nonexistent")
+                                        :project-keywords ("PROJECT")))))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Asked for a profile"))))
+        (with-current-buffer (find-buffer-visiting org-linear-file)
+          (should (equal (org-linear-project--profile) nil)))))))
+
 (ert-deftest org-linear-test-mirror-project-create-then-edit ()
   "An outcome edited before the first sync after the creation is sent."
   (org-linear-test--with-board

@@ -45,12 +45,14 @@
 That is the current buffer's, if it has projects, or else the only
 profile with projects.  With ASK, or when several profiles have projects
 and the buffer belongs to none of them, ask."
-  (let ((candidates (seq-filter #'org-linear-project--profile-has-projects-p
-                                (org-linear--profile-names))))
+  (let* ((candidates (seq-filter #'org-linear-project--profile-has-projects-p
+                                 (org-linear--profile-names)))
+         ;; A list, since nil, the default profile, is a profile found.
+         (own (seq-filter #'org-linear-project--buffer-in-profile-p candidates)))
     (cond
      ((null candidates) (user-error "No profile has projects"))
      (ask (org-linear-project--read-profile candidates))
-     ((seq-find (lambda (name) (org-linear-project--buffer-in-profile-p name)) candidates))
+     (own (car own))
      ((null (cdr candidates)) (car candidates))
      (t (org-linear-project--read-profile candidates)))))
 
