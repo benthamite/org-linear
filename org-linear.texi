@@ -645,10 +645,11 @@ Turning the options on makes the next sync read every file again and send the re
 
 A task says what to do; a project says what state of the world to reach. With @code{org-linear-project-keywords} and @code{org-linear-milestone-keywords} set (@ref{Projects initiatives and milestones, , Projects@comma{} initiatives and milestones})@comma{} three commands help you work with projects rather than only with tasks: one creates a project@comma{} one shows where projects stand@comma{} and one shows what a task is for. They read the headings of a profile: its project headings are those with a project keyword or linked to a Linear project or initiative@comma{} and its milestone headings those with a milestone keyword or linked to a milestone. Each command works on the profile that syncs the current buffer's file@comma{} the default profile included when its mirrored file is current; elsewhere@comma{} on the only profile with projects. When several profiles have projects and none syncs the current file@comma{} or with a prefix argument@comma{} it asks.
 
-In the in-place layout@comma{} the commands read the files that the last sync found holding Linear IDs or headings to create@comma{} the files open in Emacs@comma{} and @code{org-linear-project-file}. A project heading in a file that has never synced@comma{} and is not open@comma{} shows up after the next sync. In the mirror layout@comma{} they read @code{org-linear-file}@comma{} whose top-level headings are the projects.
+In the in-place layout@comma{} the commands read the files that the last sync found holding Linear IDs or headings to create@comma{} the files open in Emacs@comma{} @code{org-linear-project-file} and the files in @code{org-linear-project-files-directory}. A project heading in a file that has never synced@comma{} and is not open@comma{} shows up after the next sync. In the mirror layout@comma{} they read @code{org-linear-file}@comma{} whose top-level headings are the projects.
 
 @findex org-linear-project-create
 @vindex org-linear-project-file
+@vindex org-linear-project-files-directory
 @vindex org-linear-project-directory-property
 @samp{M-x org-linear-project-create} adds a project. It asks for:
 
@@ -658,7 +659,7 @@ the name;
 @item
 the outcome@comma{} the end state the project aims at@comma{} which goes in the @samp{OUTCOME} property and so becomes the Linear project's summary (leave it empty for none);
 @item
-in the in-place layout@comma{} the parent project@comma{} among the open ones@comma{} by default the project at point; with none@comma{} the project goes at the end of @code{org-linear-project-file}@comma{} or of the current file if that option is @samp{nil}@comma{} and the file must be one the profile syncs;
+in the in-place layout@comma{} the parent project@comma{} among the open ones@comma{} by default the project at point; with none@comma{} the project goes at the end of @code{org-linear-project-file}@comma{} or of the current file if that option is @samp{nil}@comma{} and the file must be one the profile syncs. With @code{org-linear-project-files-directory} set@comma{} a project with no parent gets a file of its own instead: @samp{NAME.org} in that directory@comma{} where @samp{NAME} is the name of the project's directory without leading dots@comma{} when it names one@comma{} and otherwise the project's name in lower case with a hyphen for each run of other characters than letters and digits. A new file gets the project's name as its title@comma{} and a file that exists already gets the project at its end;
 @item
 the target date@comma{} read as Org reads dates@comma{} so @samp{+3w} and @samp{dec 15} work@comma{} which becomes the heading's @samp{DEADLINE} (leave it empty for none);
 @item

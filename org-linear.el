@@ -487,6 +487,19 @@ file of the current buffer, if it is an Org file."
   :type '(choice (const :tag "The current file" nil) file)
   :group 'org-linear)
 
+(defcustom org-linear-project-files-directory nil
+  "Directory in which each project with no parent gets a file of its own.
+With it set, `org-linear-project-create' does not use
+`org-linear-project-file': it puts such a project in NAME.org in this
+directory, which it creates when missing.  NAME is the name of the
+project's directory, without leading dots, when the project names one
+\(see `org-linear-project-directory-property'), and otherwise the
+project's name in lower case with a hyphen for each run of other
+characters than letters and digits.  A file that exists already gets the
+project at its end.  Nil means `org-linear-project-file' decides."
+  :type '(choice (const :tag "None" nil) directory)
+  :group 'org-linear)
+
 (defcustom org-linear-project-directory-property nil
   "Property of a project heading that names the project's directory, or nil.
 With it set, `org-linear-project-create' asks for a directory and refuses

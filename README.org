@@ -510,16 +510,17 @@ Turning the options on makes the next sync read every file again and send the re
 
 A task says what to do; a project says what state of the world to reach. With ~org-linear-project-keywords~ and ~org-linear-milestone-keywords~ set ([[#h:hierarchy][Projects, initiatives and milestones]]), three commands help you work with projects rather than only with tasks: one creates a project, one shows where projects stand, and one shows what a task is for. They read the headings of a profile: its project headings are those with a project keyword or linked to a Linear project or initiative, and its milestone headings those with a milestone keyword or linked to a milestone. Each command works on the profile that syncs the current buffer's file, the default profile included when its mirrored file is current; elsewhere, on the only profile with projects. When several profiles have projects and none syncs the current file, or with a prefix argument, it asks.
 
-In the in-place layout, the commands read the files that the last sync found holding Linear IDs or headings to create, the files open in Emacs, and ~org-linear-project-file~. A project heading in a file that has never synced, and is not open, shows up after the next sync. In the mirror layout, they read ~org-linear-file~, whose top-level headings are the projects.
+In the in-place layout, the commands read the files that the last sync found holding Linear IDs or headings to create, the files open in Emacs, ~org-linear-project-file~ and the files in ~org-linear-project-files-directory~. A project heading in a file that has never synced, and is not open, shows up after the next sync. In the mirror layout, they read ~org-linear-file~, whose top-level headings are the projects.
 
 #+findex: org-linear-project-create
 #+vindex: org-linear-project-file
+#+vindex: org-linear-project-files-directory
 #+vindex: org-linear-project-directory-property
 =M-x org-linear-project-create= adds a project. It asks for:
 
 - the name;
 - the outcome, the end state the project aims at, which goes in the =OUTCOME= property and so becomes the Linear project's summary (leave it empty for none);
-- in the in-place layout, the parent project, among the open ones, by default the project at point; with none, the project goes at the end of ~org-linear-project-file~, or of the current file if that option is =nil=, and the file must be one the profile syncs;
+- in the in-place layout, the parent project, among the open ones, by default the project at point; with none, the project goes at the end of ~org-linear-project-file~, or of the current file if that option is =nil=, and the file must be one the profile syncs. With ~org-linear-project-files-directory~ set, a project with no parent gets a file of its own instead: =NAME.org= in that directory, where =NAME= is the name of the project's directory without leading dots, when it names one, and otherwise the project's name in lower case with a hyphen for each run of other characters than letters and digits. A new file gets the project's name as its title, and a file that exists already gets the project at its end;
 - the target date, read as Org reads dates, so =+3w= and =dec 15= work, which becomes the heading's =DEADLINE= (leave it empty for none);
 - in the in-place layout with ~org-linear-project-directory-property~ set to a property name, whether the project has a directory of its own, and which. A directory that another project heading already names is refused.
 

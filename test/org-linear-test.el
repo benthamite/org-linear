@@ -4588,6 +4588,7 @@ The notes are synced once, so the scan cache knows the file."
   (declare (indent 0))
   `(org-linear-test--with-hierarchy `(("plan.org" . ,org-linear-project-test--plan))
      (let ((org-linear-project-file nil)
+           (org-linear-project-files-directory nil)
            (org-linear-project-directory-property nil))
        (org-linear-test--sync-until-quiet)
        ,@body)))
@@ -4661,6 +4662,33 @@ ANSWERS is an alist from a regexp matching a prompt to the answer."
         (org-linear-project-create))
       (should (equal (org-linear-test--note "projects.org")
                      "#+title: Projects\n* PROJECT Solo\n")))))
+
+(ert-deftest org-linear-project-test-create-file-of-its-own ()
+  "With a directory for project files, a project with no parent gets its own.
+The file is named after the project's directory, or else its name, and
+the commands find the project there."
+  (org-linear-project-test--with-plan
+    (let ((org-linear-project-files-directory
+           (expand-file-name "projects/" org-linear-test--notes))
+          (org-linear-project-file (expand-file-name "projects.org" org-linear-test--notes))
+          (org-linear-project-directory-property "PROJECT_DIR")
+          (dir (file-name-as-directory (expand-file-name ".repo" org-linear-test--dir))))
+      (make-directory dir)
+      (org-linear-project-test--answering
+          '(("Project name" . "Solo: the 2nd!") ("Outcome" . "") ("Parent project" . "(none)")
+            ("Target date" . ""))
+        (let ((org-linear-project-directory-property nil))
+          (org-linear-project-create)))
+      (should (equal (org-linear-test--note "projects/solo-the-2nd.org")
+                     "#+title: Solo: the 2nd!\n* PROJECT Solo: the 2nd!\n"))
+      (org-linear-project-test--answering
+          `(("Project name" . "Repo work") ("Outcome" . "") ("Parent project" . "(none)")
+            ("Target date" . "") ("directory of its own" . t) ("Directory" . ,dir))
+        (org-linear-project-create))
+      (should (string-prefix-p "#+title: Repo work\n* PROJECT Repo work\n"
+                               (org-linear-test--note "projects/repo.org")))
+      (should-not (file-exists-p (expand-file-name "projects.org" org-linear-test--notes)))
+      (should (org-linear-project-test--node (org-linear-project--forest) "Repo work")))))
 
 (ert-deftest org-linear-project-test-create-refuses-file-out-of-scope ()
   "A project is not put in a file the profile does not sync."

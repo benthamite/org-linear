@@ -97,7 +97,9 @@ milestones."
   "Return the files of the profile in effect that may hold project headings.
 In the in-place layout, those are the files the last sync found holding
 Linear IDs or headings to create, the files of buffers in scope, and
-`org-linear-project-file'; of them, those that hold a project heading."
+`org-linear-project-file' and the files in
+`org-linear-project-files-directory'; of them, those that hold a project
+heading."
   (if (not (eq org-linear-layout 'in-place))
       (and org-linear-file (file-exists-p org-linear-file) (list org-linear-file))
     (org-linear--load-state)
@@ -123,6 +125,10 @@ Linear IDs or headings to create, the files of buffers in scope, and
         (push file files)))
     (when org-linear-project-file
       (push org-linear-project-file files))
+    (when (and org-linear-project-files-directory
+               (file-directory-p org-linear-project-files-directory))
+      (setq files (nconc (directory-files org-linear-project-files-directory t "\\.org\\'")
+                         files)))
     (seq-filter (lambda (file) (and (file-exists-p file) (org-linear-project--in-scope-p file)))
                 (delete-dups (mapcar #'expand-file-name files)))))
 
@@ -316,8 +322,9 @@ the profile.
 
 In the in-place layout, where Org is the primary copy, the heading gets
 the first of `org-linear-project-keywords' and goes under the parent you
-choose, as its last subheading, or else at the end of
-`org-linear-project-file', or of the current file if that option is nil.
+choose, as its last subheading, or else in a file of its own in
+`org-linear-project-files-directory', or without that option at the end
+of `org-linear-project-file', or of the current file if that is nil too.
 With `org-linear-project-directory-property' set, it can also name the
 project's directory.  The file is saved, and the next sync creates the
 project in Linear.
@@ -469,7 +476,7 @@ and :directory."
   (let ((parent (plist-get spec :parent)))
     (if parent
         (org-linear-project--goto parent)
-      (find-file (org-linear-project--top-file)))
+      (org-linear-project--visit-top-file spec))
     (let ((level (if parent (1+ (org-outline-level)) 1)))
       (if parent
           (org-end-of-subtree t t)
@@ -483,14 +490,39 @@ and :directory."
       (save-buffer)
       (org-fold-show-entry))))
 
-(defun org-linear-project--top-file ()
-  "Return the file a project with no parent goes in.
+(defun org-linear-project--visit-top-file (spec)
+  "Visit the file the project SPEC describes, which has no parent, goes in.
+A file of its own that does not exist yet gets the project's name as
+its title."
+  (let ((file (org-linear-project--top-file spec)))
+    (make-directory (file-name-directory file) t)
+    (find-file file)
+    (when (and org-linear-project-files-directory (= (point-min) (point-max)))
+      (insert "#+title: " (plist-get spec :name) "\n"))))
+
+(defun org-linear-project--top-file (spec)
+  "Return the file the project SPEC describes, which has no parent, goes in.
 Signal an error unless the profile in effect syncs it."
-  (let ((file (or org-linear-project-file (org-linear-project--buffer-file)
+  (let ((file (or (and org-linear-project-files-directory
+                       (expand-file-name (concat (org-linear-project--file-name spec) ".org")
+                                         org-linear-project-files-directory))
+                  org-linear-project-file (org-linear-project--buffer-file)
                   (user-error "Set `org-linear-project-file', or call this from an Org file"))))
     (unless (org-linear-project--in-scope-p file)
       (user-error "%s is not among the files this profile syncs" file))
     file))
+
+(defun org-linear-project--file-name (spec)
+  "Return the name, without extension, of the file of its own for SPEC.
+See `org-linear-project-files-directory'."
+  (let* ((directory (plist-get spec :directory))
+         (name (if directory
+                   (string-trim-left
+                    (file-name-nondirectory (directory-file-name directory)) "\\.+")
+                 (string-trim (replace-regexp-in-string
+                               "[^[:alnum:]]+" "-" (downcase (plist-get spec :name)))
+                              "-+" "-+"))))
+    (if (string-empty-p name) "project" name)))
 
 (defun org-linear-project--fill-heading (spec)
   "Give the heading at point the deadline, outcome and directory of SPEC."
